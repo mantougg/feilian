@@ -74,6 +74,8 @@ type Engine struct {
 	conn     *net.UDPConn  // UDP 套接字（Start 建立，Stop 关闭）
 	bcast    []net.IP      // 各网段定向广播地址，广播时逐个发送
 	packetNo atomic.Uint64 // 出站报文序号（回执匹配的唯一凭据）
+	peers    map[string]Peer
+	peersMu  sync.RWMutex
 }
 
 // New 创建引擎。events 缓冲建议不小于 64。
@@ -84,14 +86,18 @@ func New(cfg Config, events chan Event) *Engine {
 	if cfg.Status == "" {
 		cfg.Status = StatusOnline
 	}
-	return &Engine{cfg: cfg, out: events, quit: make(chan struct{})}
+	return &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer)}
 }
 
 // Events 返回事件通道（UI 的订阅入口）。
 func (e *Engine) Events() <-chan Event { return e.out }
 
-// heartbeatInterval 是心跳周期；连续错过的次数超过超时阈值即判离线（T-M1-3）。
-const heartbeatInterval = 30 * time.Second
+// heartbeatInterval 是心跳周期；offlineTimeout 内收不到任何报文即判离线。
+const (
+	heartbeatInterval = 30 * time.Second
+	offlineTimeout    = 3 * heartbeatInterval // 连续错过 3 次心跳视为异常掉线
+	sweepInterval     = 15 * time.Second      // 超时清扫周期
+)
 
 // Start 启动引擎：建立 UDP 套接字、进入读循环并广播上线，立即返回。
 func (e *Engine) Start() error {
@@ -102,10 +108,10 @@ func (e *Engine) Start() error {
 	e.conn, e.bcast = conn, bcast
 
 	go e.readLoop()
+	go e.sweepLoop()
 	e.broadcastPresence(CmdBrEntry)
 	go e.heartbeatLoop()
 
-	// TODO(T-M1-3) 用户表：peers map + 读写锁，Peers() 返回快照。
 	// TODO(T-M1-4) 文本消息：UDP 直发 CmdSendMsg|OptSendCheck，收到后回 CmdRecvMsg。
 	return nil
 }
@@ -182,13 +188,15 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup) {
 	case CmdBrEntry:
 		e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
-		e.emitPeerOnline(pkt, from)
+		e.upsertPresence(pkt, from)
 	case CmdAnsEntry:
-		e.emitPeerOnline(pkt, from)
+		e.upsertPresence(pkt, from)
 	case CmdBrExit:
-		e.emit(Event{Type: EventPeerOffline, Peer: Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}, Time: time.Now()})
+		e.removePeer(pkt)
+	case CmdBrAbsence:
+		e.applyAbsence(pkt, from)
 	case CmdNoOperation:
-		// 心跳只刷新 LastSeen，属 T-M1-3 用户表职责
+		e.refreshPeer(pkt, from)
 	default:
 		// CmdSendMsg 等 T-M1-4 处理，先静默
 	}
@@ -203,25 +211,127 @@ func (e *Engine) presenceJSON() string {
 	return string(b)
 }
 
-// emitPeerOnline 从 Entry/AnsEntry 报文构造 EventPeerOnline 事件。
-func (e *Engine) emitPeerOnline(pkt Packet, from *net.UDPAddr) {
+// peerKey 用户表主键：同机双开（host 相同）靠昵称区分。
+func peerKey(nick, host string) string { return nick + "@" + host }
+
+// parsePresence 解析扩展 JSON；非 JSON 内容（如飞秋报文）静默得到零值。
+func parsePresence(extra string) presenceExtra {
 	var px presenceExtra
-	_ = json.Unmarshal([]byte(pkt.Extra), &px)
+	_ = json.Unmarshal([]byte(extra), &px)
+	return px
+}
+
+// upsertPresence 处理 Entry/AnsEntry：新增用户推 peer_online，
+// 已知用户部门/状态变化推 peer_update，其余只刷新 LastSeen。
+func (e *Engine) upsertPresence(pkt Packet, from *net.UDPAddr) {
+	px := parsePresence(pkt.Extra)
 	// Status 兜底 online：解析失败或对端未携带时按在线处理
 	if px.Status == "" {
 		px.Status = StatusOnline
 	}
-	e.emit(Event{
-		Type: EventPeerOnline,
-		Peer: Peer{
-			Nick:   pkt.Nick,
-			Host:   pkt.Host,
-			IP:     from.IP.String(),
-			Dept:   px.Dept,
-			Status: px.Status,
-		},
-		Time: time.Now(),
-	})
+	key := peerKey(pkt.Nick, pkt.Host)
+	now := time.Now()
+
+	e.peersMu.Lock()
+	old, existed := e.peers[key]
+	e.peers[key] = Peer{
+		Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(),
+		Dept: px.Dept, Status: px.Status, LastSeen: now,
+	}
+	e.peersMu.Unlock()
+
+	if !existed {
+		e.emit(Event{Type: EventPeerOnline, Peer: e.peersSnapshotOf(key), Time: now})
+		return
+	}
+	if old.Dept != px.Dept || old.Status != px.Status {
+		e.emit(Event{Type: EventPeerUpdate, Peer: e.peersSnapshotOf(key), Time: now})
+	}
+}
+
+// refreshPeer 处理心跳：只刷新 LastSeen，不产生事件。
+func (e *Engine) refreshPeer(pkt Packet, from *net.UDPAddr) {
+	key := peerKey(pkt.Nick, pkt.Host)
+	e.peersMu.Lock()
+	if p, ok := e.peers[key]; ok {
+		p.IP, p.LastSeen = from.IP.String(), time.Now()
+		e.peers[key] = p
+	}
+	e.peersMu.Unlock()
+	// 未记录的心跳来源不建档：等它的 Entry/AnsEntry 带上完整资料再入库
+}
+
+// applyAbsence 处理状态变更广播：未知用户忽略，已知用户映射状态后推 peer_update。
+func (e *Engine) applyAbsence(pkt Packet, from *net.UDPAddr) {
+	px := parsePresence(pkt.Extra)
+	switch px.Status {
+	case StatusOnline, StatusBusy, StatusAway:
+	default:
+		return // 非法/未携带状态（如飞秋自定义串），M1 不猜
+	}
+	key := peerKey(pkt.Nick, pkt.Host)
+	e.peersMu.Lock()
+	p, ok := e.peers[key]
+	if ok && p.Status != px.Status {
+		p.Status, p.IP, p.LastSeen = px.Status, from.IP.String(), time.Now()
+		e.peers[key] = p
+	}
+	e.peersMu.Unlock()
+	if ok {
+		e.emit(Event{Type: EventPeerUpdate, Peer: p, Time: time.Now()})
+	}
+}
+
+// removePeer 处理下线广播：从表中移除并推 peer_offline。
+func (e *Engine) removePeer(pkt Packet) {
+	key := peerKey(pkt.Nick, pkt.Host)
+	e.peersMu.Lock()
+	p, ok := e.peers[key]
+	delete(e.peers, key)
+	e.peersMu.Unlock()
+	if ok {
+		p.LastSeen = time.Now()
+		e.emit(Event{Type: EventPeerOffline, Peer: p, Time: time.Now()})
+	}
+}
+
+// sweepLoop 周期清扫：超时未见报文的用户判离线（异常掉线无 CmdBrExit 的兜底）。
+func (e *Engine) sweepLoop() {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.quit:
+			return
+		case <-ticker.C:
+			e.sweepPeers()
+		}
+	}
+}
+
+// sweepPeers 单次清扫，返回因超时移除的用户数（测试用）。
+func (e *Engine) sweepPeers() int {
+	cutoff := time.Now().Add(-offlineTimeout)
+	e.peersMu.Lock()
+	var gone []Peer
+	for k, p := range e.peers {
+		if p.LastSeen.Before(cutoff) {
+			gone = append(gone, p)
+			delete(e.peers, k)
+		}
+	}
+	e.peersMu.Unlock()
+	for _, p := range gone {
+		e.emit(Event{Type: EventPeerOffline, Peer: p, Time: time.Now()})
+	}
+	return len(gone)
+}
+
+// peersSnapshotOf 取锁内某个用户的最新快照（emit 在锁外，取值须在锁内完成）。
+func (e *Engine) peersSnapshotOf(key string) Peer {
+	e.peersMu.RLock()
+	defer e.peersMu.RUnlock()
+	return e.peers[key]
 }
 
 // emit 推送事件；通道满时丢弃（订阅方阻塞不应拖垮引擎）。
@@ -267,9 +377,16 @@ func (e *Engine) SendText(ip, text string) error { return nil }
 // TODO(T-M1-4)
 func (e *Engine) BroadcastText(text string) error { return nil }
 
-// Peers 返回当前在线用户快照。
-// TODO(T-M1-3)
-func (e *Engine) Peers() []Peer { return nil }
+// Peers 返回当前在线用户快照（拷贝，调用方可安全读写）。
+func (e *Engine) Peers() []Peer {
+	e.peersMu.RLock()
+	defer e.peersMu.RUnlock()
+	out := make([]Peer, 0, len(e.peers))
+	for _, p := range e.peers {
+		out = append(out, p)
+	}
+	return out
+}
 
 // listenUDP 绑定 UDP 端口，返回套接字与本机各网段的定向广播地址。
 //
