@@ -40,6 +40,7 @@ type Peer struct {
 	Nick     string    // 昵称
 	Host     string    // 主机名
 	IP       string    // 来源地址（形如 192.168.1.23）
+	Port     int       // 对方实际监听端口（标准部署恒 2425；同机联调双开端口不同）
 	Dept     string    // 部门/分组（飞联扩展字段）
 	Status   string    // online | busy | away | offline
 	LastSeen time.Time // 最后一次收到报文的时间
@@ -219,19 +220,24 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 	case CmdSendMsg:
 		e.handleSendMsg(pkt, from)
 	case CmdRecvMsg:
-		// 回执报文的 extra = 被确认报文的 PacketNo（IPMsg 标准语义）
+		// 回执发送者 = 消息接收者，报文源地址带其真实监听端口；
+		// 建档后我方纯 IP 发送即可查表命中（同机双开端口不同的联调依赖此路径）
+		e.upsertPresence(pkt, from)
 		e.emit(Event{Type: EventReceipt, MsgID: pkt.Extra, Time: time.Now()})
 	default:
 		// 未知命令静默忽略，保持与异构客户端（飞秋/飞鸽）兼容
 	}
 }
 
-// handleSendMsg 处理收到的文本消息：要求回执时先回 CmdRecvMsg，再推 EventMessage。
+// handleSendMsg 处理收到的文本消息：先建档/刷新（发消息者必在线，
+// 未记录用户借此入表——广播不可达的同机双开端口语境依赖此路径），
+// 要求回执时回 CmdRecvMsg，再推 EventMessage。
 func (e *Engine) handleSendMsg(pkt Packet, from *net.UDPAddr) {
+	e.upsertPresence(pkt, from)
 	if pkt.HasOpt(OptSendCheck) {
 		_ = e.sendPacket(CmdRecvMsg, strconv.FormatUint(pkt.PacketNo, 10), from)
 	}
-	peer := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}
+	peer := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port}
 	if p, ok := e.peerInfo(peerKey(pkt.Nick, pkt.Host)); ok {
 		peer.Dept, peer.Status = p.Dept, p.Status
 	}
@@ -285,7 +291,7 @@ func (e *Engine) upsertPresence(pkt Packet, from *net.UDPAddr) {
 	e.peersMu.Lock()
 	old, existed := e.peers[key]
 	e.peers[key] = Peer{
-		Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(),
+		Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port,
 		Dept: px.Dept, Status: px.Status, LastSeen: now,
 	}
 	e.peersMu.Unlock()
@@ -304,7 +310,7 @@ func (e *Engine) refreshPeer(pkt Packet, from *net.UDPAddr) {
 	key := peerKey(pkt.Nick, pkt.Host)
 	e.peersMu.Lock()
 	if p, ok := e.peers[key]; ok {
-		p.IP, p.LastSeen = from.IP.String(), time.Now()
+		p.IP, p.Port, p.LastSeen = from.IP.String(), from.Port, time.Now()
 		e.peers[key] = p
 	}
 	e.peersMu.Unlock()
@@ -322,8 +328,8 @@ func (e *Engine) applyAbsence(pkt Packet, from *net.UDPAddr) {
 	key := peerKey(pkt.Nick, pkt.Host)
 	e.peersMu.Lock()
 	p, ok := e.peers[key]
-	if ok && p.Status != px.Status {
-		p.Status, p.IP, p.LastSeen = px.Status, from.IP.String(), time.Now()
+	if ok && (p.Status != px.Status || p.IP != from.IP.String() || p.Port != from.Port) {
+		p.Status, p.IP, p.Port, p.LastSeen = px.Status, from.IP.String(), from.Port, time.Now()
 		e.peers[key] = p
 	}
 	e.peersMu.Unlock()
@@ -419,17 +425,45 @@ func (e *Engine) nextPacketNo() uint64 {
 	return e.packetNo.Add(1)
 }
 
-// SendText 向指定 IP 发送文本消息（单播，要求回执；
-// 对方确认后 EventReceipt 会带回本次报文的 PacketNo 字符串）。
-func (e *Engine) SendText(ip, text string) error {
-	if e.conn == nil {
-		return ErrNotStarted
+// SendText 向指定地址发送文本消息（单播，要求回执；对方确认后
+// EventReceipt 会带回本次报文的 PacketNo 字符串）。
+// dst 支持 "ip"（端口自动查用户表，未命中用协议端口）与 "ip:port" 两种形式。
+func (e *Engine) SendText(dst, text string) error {
+	ip, port, err := e.resolveAddr(dst)
+	if err != nil {
+		return err
 	}
-	ip4 := net.ParseIP(ip).To4()
-	if ip4 == nil {
-		return fmt.Errorf("engine: 无效 IP %q", ip)
+	return e.sendPacket(CmdSendMsg|OptSendCheck, text, &net.UDPAddr{IP: ip, Port: port})
+}
+
+// resolveAddr 解析目标地址：显式 "ip:port" 直用；纯 "ip" 时优先取用户表中
+// 该 IP 记录的实际监听端口（同机联调双开端口不同），未命中退回协议端口。
+func (e *Engine) resolveAddr(dst string) (net.IP, int, error) {
+	if host, sp, err := net.SplitHostPort(dst); err == nil {
+		ip := net.ParseIP(host).To4()
+		port, perr := strconv.Atoi(sp)
+		if ip == nil || perr != nil || port <= 0 || port > 65535 {
+			return nil, 0, fmt.Errorf("engine: 无效地址 %q", dst)
+		}
+		return ip, port, nil
 	}
-	return e.sendPacket(CmdSendMsg|OptSendCheck, text, &net.UDPAddr{IP: ip4, Port: e.cfg.Port})
+	ip := net.ParseIP(dst).To4()
+	if ip == nil {
+		return nil, 0, fmt.Errorf("engine: 无效 IP %q", dst)
+	}
+	port := 0
+	e.peersMu.RLock()
+	for _, p := range e.peers {
+		if p.IP == dst && p.Port > 0 {
+			port = p.Port
+			break
+		}
+	}
+	e.peersMu.RUnlock()
+	if port == 0 {
+		port = e.cfg.Port
+	}
+	return ip, port, nil
 }
 
 // BroadcastText 向全网段广播文本消息。广播不要求回执（避免全网回执风暴）。
@@ -538,23 +572,32 @@ func directedBroadcast(n *net.IPNet) net.IP {
 	return b
 }
 
-// broadcast 向本机各网段定向广播地址发送一份报文，并以受限广播
+// broadcast 向本机各网段定向广播地址发送报文，并以受限广播
 // 255.255.255.255 兜底覆盖极端网络环境；只返回首个发送失败。
-// 目的端口取套接字实际绑定端口（协议上各端监听同一端口）。
+// 目的端口取「本机协议端口 + 套接字实际绑定端口」去重集合：
+// 标准部署两者同为 2425 发一份；同机联调双开端口号不同时两份都发，
+// 让另一实例能收到广播。
 func (e *Engine) broadcast(b []byte) error {
 	if e.conn == nil {
 		return ErrNotStarted
 	}
-	port := e.conn.LocalAddr().(*net.UDPAddr).Port
+	ports := []int{e.cfg.Port}
+	if bind := e.conn.LocalAddr().(*net.UDPAddr).Port; bind != e.cfg.Port {
+		ports = append(ports, bind)
+	}
 	var firstErr error
 	for _, ip := range e.bcast {
-		if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: ip, Port: port}); err != nil && firstErr == nil {
-			firstErr = err
+		for _, port := range ports {
+			if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: ip, Port: port}); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	// 受限广播兜底，覆盖枚举不到定向广播地址的极端环境
-	if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: net.IPv4bcast, Port: port}); err != nil && firstErr == nil {
-		firstErr = err
+	for _, port := range ports {
+		if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: net.IPv4bcast, Port: port}); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
 }

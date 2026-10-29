@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -116,6 +117,53 @@ func TestSendText(t *testing.T) {
 	}
 	pkt, ok := ParsePacket(string(buf[:n]))
 	if !ok || pkt.Command != CmdSendMsg|OptSendCheck || pkt.Extra != "你好，飞联 🚀" || pkt.Nick != "我" {
+		t.Fatalf("线上报文异常: %+v ok=%v", pkt, ok)
+	}
+}
+
+// resolveAddr 的三种口径：显式 ip:port 直用；纯 IP 查用户表端口；未命中退协议端口。
+func TestResolveAddr(t *testing.T) {
+	e := New(Config{Nick: "我", Hostname: "PC-ME", Port: 2425}, make(chan Event, 8))
+	e.peers["周舟@PC-ZHOU"] = Peer{Nick: "周舟", IP: "192.168.1.60", Port: 2426}
+
+	ip, port, err := e.resolveAddr("192.168.1.60")
+	if err != nil || port != 2426 || ip.String() != "192.168.1.60" {
+		t.Fatalf("查表口径失败: %v %d %v", ip, port, err)
+	}
+	_, port, err = e.resolveAddr("10.0.0.9")
+	if err != nil || port != 2425 {
+		t.Fatalf("兜底口径失败: port=%d err=%v", port, err)
+	}
+	ip, port, err = e.resolveAddr("10.0.0.9:9911")
+	if err != nil || port != 9911 || ip.String() != "10.0.0.9" {
+		t.Fatalf("显式端口口径失败: %v %d %v", ip, port, err)
+	}
+	if _, _, err := e.resolveAddr("not-an-ip"); err == nil {
+		t.Fatalf("非法地址应报错")
+	}
+	if _, _, err := e.resolveAddr("1.2.3.4:0"); err == nil {
+		t.Fatalf("非法端口应报错")
+	}
+}
+
+// 显式 ip:port 发送不依赖协议端口（同机双开端口号不同的联调模式）。
+func TestSendTextExplicitPort(t *testing.T) {
+	c, cAddr := loopbackPeer(t)
+	e := New(Config{Nick: "我", Hostname: "PC-ME", Port: 2425}, make(chan Event, 8))
+	attachConn(t, e, make(chan Event, 8)) // 引擎绑随机端口，cfg.Port 保持 2425
+
+	dst := fmt.Sprintf("127.0.0.1:%d", cAddr.Port)
+	if err := e.SendText(dst, "定向联调消息"); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	n, _, err := c.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("对端未收到消息: %v", err)
+	}
+	pkt, ok := ParsePacket(string(buf[:n]))
+	if !ok || pkt.Extra != "定向联调消息" || pkt.Command != CmdSendMsg|OptSendCheck {
 		t.Fatalf("线上报文异常: %+v ok=%v", pkt, ok)
 	}
 }
