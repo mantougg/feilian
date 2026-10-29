@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -20,16 +22,16 @@ const (
 
 // 引擎事件类型（Event.Type 取值）。
 const (
-	EventPeerOnline      = "peer_online"       // 新用户上线
-	EventPeerOffline     = "peer_offline"      // 用户下线/超时
-	EventPeerUpdate      = "peer_update"       // 昵称/状态/部门变更
-	EventMessage         = "message"           // 收到文本消息
-	EventReceipt         = "receipt"           // 对方回执（已送达）
-	EventTyping          = "typing"            // 对方正在输入
-	EventFileRequest     = "file_request"      // 对方发来文件请求
-	EventFileProgress    = "file_progress"     // 传输进度
-	EventFileDone        = "file_done"         // 传输完成
-	EventEngineError     = "error"             // 引擎错误（发往 UI 提示）
+	EventPeerOnline   = "peer_online"   // 新用户上线
+	EventPeerOffline  = "peer_offline"  // 用户下线/超时
+	EventPeerUpdate   = "peer_update"   // 昵称/状态/部门变更
+	EventMessage      = "message"       // 收到文本消息
+	EventReceipt      = "receipt"       // 对方回执（已送达）
+	EventTyping       = "typing"        // 对方正在输入
+	EventFileRequest  = "file_request"  // 对方发来文件请求
+	EventFileProgress = "file_progress" // 传输进度
+	EventFileDone     = "file_done"     // 传输完成
+	EventEngineError  = "error"         // 引擎错误（发往 UI 提示）
 )
 
 // Peer 描述局域网内的一个其他用户。
@@ -44,11 +46,11 @@ type Peer struct {
 
 // Event 是引擎推给 UI 的事件。字段按 Type 取用，其余为零值。
 type Event struct {
-	Type   string
-	Peer   Peer
-	MsgID  string // 我方报文 PacketNo 的字符串形式（回执匹配用）
-	Text   string // 文本内容 / 错误信息
-	Time   time.Time
+	Type  string
+	Peer  Peer
+	MsgID string // 我方报文 PacketNo 的字符串形式（回执匹配用）
+	Text  string // 文本内容 / 错误信息
+	Time  time.Time
 }
 
 // Config 引擎配置（M1 由 app.go 从本地配置读取，M4-T 持久化）。
@@ -65,12 +67,13 @@ var ErrNotStarted = errors.New("engine: not started")
 
 // Engine 是网络引擎门面，M1 逐任务实现。
 type Engine struct {
-	cfg   Config
-	out   chan Event
-	quit  chan struct{}
-	once  sync.Once
-	conn  *net.UDPConn // UDP 套接字（Start 建立，Stop 关闭）
-	bcast []net.IP     // 各网段定向广播地址，广播时逐个发送
+	cfg      Config
+	out      chan Event
+	quit     chan struct{}
+	once     sync.Once
+	conn     *net.UDPConn  // UDP 套接字（Start 建立，Stop 关闭）
+	bcast    []net.IP      // 各网段定向广播地址，广播时逐个发送
+	packetNo atomic.Uint64 // 出站报文序号（回执匹配的唯一凭据）
 }
 
 // New 创建引擎。events 缓冲建议不小于 64。
@@ -87,7 +90,10 @@ func New(cfg Config, events chan Event) *Engine {
 // Events 返回事件通道（UI 的订阅入口）。
 func (e *Engine) Events() <-chan Event { return e.out }
 
-// Start 启动引擎：建立 UDP 套接字后立即返回，内部循环跑在后台 goroutine。
+// heartbeatInterval 是心跳周期；连续错过的次数超过超时阈值即判离线（T-M1-3）。
+const heartbeatInterval = 30 * time.Second
+
+// Start 启动引擎：建立 UDP 套接字、进入读循环并广播上线，立即返回。
 func (e *Engine) Start() error {
 	conn, bcast, err := listenUDP(e.cfg.Port)
 	if err != nil {
@@ -95,24 +101,162 @@ func (e *Engine) Start() error {
 	}
 	e.conn, e.bcast = conn, bcast
 
-	// TODO(T-M1-2) 读循环与发现：
-	//   - 启动即广播 CmdBrEntry，收到他人 Entry 时单播回 CmdAnsEntry；
-	//   - 定时心跳（CmdNoOperation），超时未见的 Peer 按 EventPeerOffline 下线；
-	//   - 实测广播回环会把包投递给同端口的所有 socket（含发送者自己），
-	//     读循环必须按 nick/host 过滤自己发出的报文。
-	//
+	go e.readLoop()
+	e.broadcastPresence(CmdBrEntry)
+	go e.heartbeatLoop()
+
 	// TODO(T-M1-3) 用户表：peers map + 读写锁，Peers() 返回快照。
 	// TODO(T-M1-4) 文本消息：UDP 直发 CmdSendMsg|OptSendCheck，收到后回 CmdRecvMsg。
 	return nil
 }
 
-// Stop 停止引擎：广播 CmdBrExit 下线包并结束内部循环。
-// TODO(T-M1-2)：实现退出包广播。
+// Stop 停止引擎：先广播 CmdBrExit 下线包，再结束内部循环并关闭套接字。
 func (e *Engine) Stop() {
-	e.once.Do(func() { close(e.quit) })
-	if e.conn != nil {
-		e.conn.Close()
+	e.once.Do(func() {
+		e.broadcastPresence(CmdBrExit)
+		close(e.quit)
+		if e.conn != nil {
+			e.conn.Close()
+		}
+	})
+}
+
+// presenceExtra 是飞联在 Entry/AnsEntry 报文 extra 里携带的 JSON 扩展信息；
+// 飞秋/飞鸽会忽略无法识别的 extra 内容（T-M1-7 互通时复核）。
+type presenceExtra struct {
+	Dept   string `json:"dept,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+// broadcastPresence 广播一条携带本机扩展信息的 Presence 类报文（Entry/Exit/心跳）。
+func (e *Engine) broadcastPresence(cmd uint32) {
+	extra := ""
+	if cmd == CmdBrEntry {
+		b, err := json.Marshal(presenceExtra{Dept: e.cfg.Dept, Status: e.cfg.Status})
+		if err == nil {
+			extra = string(b)
+		}
 	}
+	e.broadcastPacket(cmd, extra)
+}
+
+// heartbeatLoop 每 heartbeatInterval 广播一次 CmdNoOperation 维持在线可见。
+func (e *Engine) heartbeatLoop() {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.quit:
+			return
+		case <-ticker.C:
+			e.broadcastPacket(CmdNoOperation, "")
+		}
+	}
+}
+
+// readLoop 阻塞读取 UDP 报文并分发，直到套接字关闭。
+func (e *Engine) readLoop() {
+	buf := make([]byte, 4096)
+	for {
+		n, from, err := e.conn.ReadFromUDP(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue // 暂时性读错误（如缓冲溢出），不终止循环
+		}
+		pkt, ok := ParsePacket(string(buf[:n]))
+		if !ok {
+			continue
+		}
+		// 广播回环会把本机发出的包投递回自己，按 nick/host 过滤
+		if pkt.Nick == e.cfg.Nick && pkt.Host == e.cfg.Hostname {
+			continue
+		}
+		e.handlePacket(pkt, from)
+	}
+}
+
+// handlePacket 按命令码分发已解析的报文。
+func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
+	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup) {
+	case CmdBrEntry:
+		e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
+		e.emitPeerOnline(pkt, from)
+	case CmdAnsEntry:
+		e.emitPeerOnline(pkt, from)
+	case CmdBrExit:
+		e.emit(Event{Type: EventPeerOffline, Peer: Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}, Time: time.Now()})
+	case CmdNoOperation:
+		// 心跳只刷新 LastSeen，属 T-M1-3 用户表职责
+	default:
+		// CmdSendMsg 等 T-M1-4 处理，先静默
+	}
+}
+
+// presenceJSON 序列化本机扩展信息， marshal 失败时退化为空 extra。
+func (e *Engine) presenceJSON() string {
+	b, err := json.Marshal(presenceExtra{Dept: e.cfg.Dept, Status: e.cfg.Status})
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// emitPeerOnline 从 Entry/AnsEntry 报文构造 EventPeerOnline 事件。
+func (e *Engine) emitPeerOnline(pkt Packet, from *net.UDPAddr) {
+	var px presenceExtra
+	_ = json.Unmarshal([]byte(pkt.Extra), &px)
+	// Status 兜底 online：解析失败或对端未携带时按在线处理
+	if px.Status == "" {
+		px.Status = StatusOnline
+	}
+	e.emit(Event{
+		Type: EventPeerOnline,
+		Peer: Peer{
+			Nick:   pkt.Nick,
+			Host:   pkt.Host,
+			IP:     from.IP.String(),
+			Dept:   px.Dept,
+			Status: px.Status,
+		},
+		Time: time.Now(),
+	})
+}
+
+// emit 推送事件；通道满时丢弃（订阅方阻塞不应拖垮引擎）。
+func (e *Engine) emit(ev Event) {
+	select {
+	case e.out <- ev:
+	default:
+	}
+}
+
+// sendPacket 单播一条报文到指定地址。
+func (e *Engine) sendPacket(cmd uint32, extra string, dst *net.UDPAddr) error {
+	if e.conn == nil {
+		return ErrNotStarted
+	}
+	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
+	_, err := e.conn.WriteToUDP([]byte(pkt.Encode()), dst)
+	return err
+}
+
+// broadcastPacket 广播一条报文到所有网段。
+func (e *Engine) broadcastPacket(cmd uint32, extra string) error {
+	if e.conn == nil {
+		return ErrNotStarted
+	}
+	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
+	return e.broadcast([]byte(pkt.Encode()))
+}
+
+// nextPacketNo 生成进程内唯一的报文序号（以 unix 秒起步，接近 IPMsg 原语义）。
+func (e *Engine) nextPacketNo() uint64 {
+	if e.packetNo.Load() == 0 {
+		e.packetNo.Store(uint64(time.Now().Unix()))
+	}
+	return e.packetNo.Add(1)
 }
 
 // SendText 向指定 IP 发送文本消息。
