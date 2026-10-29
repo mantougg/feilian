@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -112,7 +113,6 @@ func (e *Engine) Start() error {
 	e.broadcastPresence(CmdBrEntry)
 	go e.heartbeatLoop()
 
-	// TODO(T-M1-4) 文本消息：UDP 直发 CmdSendMsg|OptSendCheck，收到后回 CmdRecvMsg。
 	return nil
 }
 
@@ -197,9 +197,40 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 		e.applyAbsence(pkt, from)
 	case CmdNoOperation:
 		e.refreshPeer(pkt, from)
+	case CmdSendMsg:
+		e.handleSendMsg(pkt, from)
+	case CmdRecvMsg:
+		// 回执报文的 extra = 被确认报文的 PacketNo（IPMsg 标准语义）
+		e.emit(Event{Type: EventReceipt, MsgID: pkt.Extra, Time: time.Now()})
 	default:
-		// CmdSendMsg 等 T-M1-4 处理，先静默
+		// 未知命令静默忽略，保持与异构客户端（飞秋/飞鸽）兼容
 	}
+}
+
+// handleSendMsg 处理收到的文本消息：要求回执时先回 CmdRecvMsg，再推 EventMessage。
+func (e *Engine) handleSendMsg(pkt Packet, from *net.UDPAddr) {
+	if pkt.HasOpt(OptSendCheck) {
+		_ = e.sendPacket(CmdRecvMsg, strconv.FormatUint(pkt.PacketNo, 10), from)
+	}
+	peer := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}
+	if p, ok := e.peerInfo(peerKey(pkt.Nick, pkt.Host)); ok {
+		peer.Dept, peer.Status = p.Dept, p.Status
+	}
+	e.emit(Event{
+		Type:  EventMessage,
+		Peer:  peer,
+		MsgID: strconv.FormatUint(pkt.PacketNo, 10),
+		Text:  pkt.Extra,
+		Time:  time.Now(),
+	})
+}
+
+// peerInfo 查用户表补全消息发送者的部门/状态（未发现过时留空）。
+func (e *Engine) peerInfo(key string) (Peer, bool) {
+	e.peersMu.RLock()
+	defer e.peersMu.RUnlock()
+	p, ok := e.peers[key]
+	return p, ok
 }
 
 // presenceJSON 序列化本机扩展信息， marshal 失败时退化为空 extra。
@@ -369,13 +400,23 @@ func (e *Engine) nextPacketNo() uint64 {
 	return e.packetNo.Add(1)
 }
 
-// SendText 向指定 IP 发送文本消息。
-// TODO(T-M1-4)
-func (e *Engine) SendText(ip, text string) error { return nil }
+// SendText 向指定 IP 发送文本消息（单播，要求回执；
+// 对方确认后 EventReceipt 会带回本次报文的 PacketNo 字符串）。
+func (e *Engine) SendText(ip, text string) error {
+	if e.conn == nil {
+		return ErrNotStarted
+	}
+	ip4 := net.ParseIP(ip).To4()
+	if ip4 == nil {
+		return fmt.Errorf("engine: 无效 IP %q", ip)
+	}
+	return e.sendPacket(CmdSendMsg|OptSendCheck, text, &net.UDPAddr{IP: ip4, Port: e.cfg.Port})
+}
 
-// BroadcastText 向全网段发送广播消息（255.255.255.255 与本网段定向广播）。
-// TODO(T-M1-4)
-func (e *Engine) BroadcastText(text string) error { return nil }
+// BroadcastText 向全网段广播文本消息。广播不要求回执（避免全网回执风暴）。
+func (e *Engine) BroadcastText(text string) error {
+	return e.broadcastPacket(CmdSendMsg|OptBroadcast, text)
+}
 
 // Peers 返回当前在线用户快照（拷贝，调用方可安全读写）。
 func (e *Engine) Peers() []Peer {
@@ -480,18 +521,20 @@ func directedBroadcast(n *net.IPNet) net.IP {
 
 // broadcast 向本机各网段定向广播地址发送一份报文，并以受限广播
 // 255.255.255.255 兜底覆盖极端网络环境；只返回首个发送失败。
+// 目的端口取套接字实际绑定端口（协议上各端监听同一端口）。
 func (e *Engine) broadcast(b []byte) error {
 	if e.conn == nil {
 		return ErrNotStarted
 	}
+	port := e.conn.LocalAddr().(*net.UDPAddr).Port
 	var firstErr error
 	for _, ip := range e.bcast {
-		if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: ip, Port: e.cfg.Port}); err != nil && firstErr == nil {
+		if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: ip, Port: port}); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	// 受限广播兜底，覆盖枚举不到定向广播地址的极端环境
-	if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: net.IPv4bcast, Port: e.cfg.Port}); err != nil && firstErr == nil {
+	if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: net.IPv4bcast, Port: port}); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
