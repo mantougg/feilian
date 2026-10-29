@@ -24,8 +24,9 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		Frameless: true, // 使用前端自定义标题栏（可拖动，见 TitleBar.tsx）
-		OnStartup: app.startup,
+		Frameless:  true, // 使用前端自定义标题栏（可拖动，见 TitleBar.tsx）
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		Bind: []interface{}{
 			app,
 		},

@@ -93,6 +93,25 @@ func New(cfg Config, events chan Event) *Engine {
 // Events 返回事件通道（UI 的订阅入口）。
 func (e *Engine) Events() <-chan Event { return e.out }
 
+// Self 返回本机当前资料快照。
+func (e *Engine) Self() Config { return e.cfg }
+
+// SetSelf 更新本机资料（昵称/部门/状态）并重新广播上线，让全网刷新；
+// 留空字段保持不变，非法状态值忽略。
+func (e *Engine) SetSelf(nick, dept, status string) {
+	if nick != "" {
+		e.cfg.Nick = nick
+	}
+	if dept != "" {
+		e.cfg.Dept = dept
+	}
+	switch status {
+	case StatusOnline, StatusBusy, StatusAway:
+		e.cfg.Status = status
+	}
+	e.broadcastPresence(CmdBrEntry)
+}
+
 // heartbeatInterval 是心跳周期；offlineTimeout 内收不到任何报文即判离线。
 const (
 	heartbeatInterval = 30 * time.Second
