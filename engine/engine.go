@@ -245,7 +245,7 @@ func (e *Engine) handleSendMsg(pkt Packet, from *net.UDPAddr) {
 		Type:  EventMessage,
 		Peer:  peer,
 		MsgID: strconv.FormatUint(pkt.PacketNo, 10),
-		Text:  pkt.Extra,
+		Text:  DecodeExtra(pkt.Extra), // 飞秋报文可能是 GBK，按首包探测解码
 		Time:  time.Now(),
 	})
 }
