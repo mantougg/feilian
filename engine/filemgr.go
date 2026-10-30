@@ -295,3 +295,17 @@ func uniquePath(p string) string {
 		}
 	}
 }
+
+// SendGroupText 本地分组群聊（T-M5-2，用户拍板「本地分组即可」形态）：
+// 同一文本逐一单播给成员列表（IPMsg 原生无群概念，飞联扩展 CmdFeiLinkGroupMsg
+// 仅用于将来成员聚合；M5 阶段对端按普通单聊消息呈现）。
+// 返回首个失败（其余照发，尽力而为语义）。
+func (e *Engine) SendGroupText(text string, targets []string) error {
+	var firstErr error
+	for _, dst := range targets {
+		if _, err := e.SendText(dst, text); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
