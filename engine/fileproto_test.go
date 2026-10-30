@@ -83,3 +83,35 @@ func TestFileExtraPlainText(t *testing.T) {
 		t.Fatalf("text=%q entries=%d", text, len(entries))
 	}
 }
+
+func TestFeiqFileExtraRoundTrip(t *testing.T) {
+	entries := []FileEntry{
+		{ID: 9, Name: "资料", Attr: FileAttrDir, MTime: 0x65a00000},
+		{ID: 10, Name: "终版:说明.txt", Size: 0x1234, MTime: 0x65a00001, Attr: FileAttrRegular, RelPath: "资料/终版:说明.txt"},
+	}
+	extra := EncodeFeiqFileExtra("接收文档", entries)
+	text, got := DecodeFileExtra(extra)
+	if text != "接收文档" || len(got) != 2 {
+		t.Fatalf("飞秋附件解析异常: text=%q entries=%+v", text, got)
+	}
+	if got[0].ID != 9 || !got[0].IsDir() || got[0].Name != "资料" || got[1].ID != 10 || got[1].Name != "终版:说明.txt" || got[1].RelPath != "资料/终版:说明.txt" || got[1].Size != 0x1234 || got[1].MTime != 0x65a00001 {
+		t.Fatalf("飞秋条目字段异常: %+v", got)
+	}
+
+	gbkName, err := EncodeGBK("飞秋文件.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gbkText, err := EncodeGBK("附件消息")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, got = DecodeFileExtra(gbkText + "\x00" + "11:" + gbkName + ":20:65a00000:1\a")
+	if text != "附件消息" || len(got) != 1 || got[0].Name != "飞秋文件.txt" || got[0].Size != 0x20 {
+		t.Fatalf("GBK 飞秋附件解析异常: text=%q entries=%+v", text, got)
+	}
+	text, got = DecodeFileExtra("数字字段\x00" + "12:digits.bin:20:20261030:1\a")
+	if text != "数字字段" || len(got) != 1 || got[0].Size != 0x20 || got[0].MTime != 0x20261030 || got[0].Attr != FileAttrRegular {
+		t.Fatalf("纯数字十六进制飞秋字段解析异常: text=%q entries=%+v", text, got)
+	}
+}

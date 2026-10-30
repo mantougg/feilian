@@ -80,6 +80,16 @@ body {
   animation: v1in 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+@keyframes remote-knock {
+  0%, 100% { transform: translateX(0); }
+  15%, 45%, 75% { transform: translateX(-5px); }
+  30%, 60%, 90% { transform: translateX(5px); }
+}
+
+.remote-knock {
+  animation: remote-knock 0.65s ease-in-out;
+}
+
 @keyframes v1blink {
   0%, 60%, 100% {
     opacity: 0.25;

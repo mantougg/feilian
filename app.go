@@ -420,6 +420,14 @@ func (a *App) SendTyping(ip string) error {
 	return a.engine.SendTyping(ip)
 }
 
+// SendKnock 请求指定用户抖动窗口。
+func (a *App) SendKnock(ip string) error {
+	if a.engine == nil {
+		return engine.ErrNotStarted
+	}
+	return a.engine.SendKnock(ip)
+}
+
 // BroadcastText 向全网段广播文本消息。
 func (a *App) BroadcastText(text string) error {
 	if a.engine == nil {

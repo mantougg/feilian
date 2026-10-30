@@ -201,7 +201,7 @@ func TestBroadcastText(t *testing.T) {
 		}
 		// 跳过回环的 Entry/NoOp 等其他报文
 	}
-	if got.Extra != "全员注意" || got.HasOpt(OptSendCheck) || !got.HasOpt(OptBroadcast) {
+	if DecodeExtra(got.Extra) != "全员注意" || got.HasOpt(OptSendCheck) || !got.HasOpt(OptBroadcast) {
 		t.Fatalf("广播报文异常: %+v", got)
 	}
 }
@@ -217,10 +217,22 @@ func TestTypingIndicator(t *testing.T) {
 	if ev.Peer.Nick != "周舟" {
 		t.Fatalf("typing 事件对象错误: %+v", ev.Peer)
 	}
+	e.handlePacket(Packet{Version: 1, PacketNo: 3, Nick: "周舟", Host: "PC-ZHOU", Command: CmdInputEnd}, testAddr)
+	if ev = recvEvent(t, ch, EventTypingEnd, time.Second); ev.Peer.Nick != "周舟" {
+		t.Fatalf("typing_end 事件对象错误: %+v", ev.Peer)
+	}
+	e.handlePacket(Packet{Version: 1, PacketNo: 4, Nick: "周舟", Host: "PC-ZHOU", Command: CmdKnock}, testAddr)
+	if ev = recvEvent(t, ch, EventKnock, time.Second); ev.Peer.Nick != "周舟" {
+		t.Fatalf("knock 事件对象错误: %+v", ev.Peer)
+	}
 
 	c, cAddr := loopbackPeer(t)
 	attachConn(t, e, make(chan Event, 8))
-	if err := e.SendTyping(fmt.Sprintf("127.0.0.1:%d", cAddr.Port)); err != nil {
+	e.peersMu.Lock()
+	e.feiqIPs[cAddr.IP.String()] = true
+	e.peersMu.Unlock()
+	dst := fmt.Sprintf("127.0.0.1:%d", cAddr.Port)
+	if err := e.SendTyping(dst); err != nil {
 		t.Fatalf("SendTyping: %v", err)
 	}
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -230,8 +242,40 @@ func TestTypingIndicator(t *testing.T) {
 		t.Fatalf("对端未收到 typing: %v", err)
 	}
 	pkt, ok := ParsePacket(string(buf[:n]))
-	if !ok || pkt.Command != CmdFeiLinkTyping {
+	if !ok || pkt.Command != CmdInputing {
 		t.Fatalf("typing 报文异常: %+v ok=%v", pkt, ok)
+	}
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err = c.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("飞秋未收到 typing_end: %v", err)
+	}
+	pkt, ok = ParsePacket(string(buf[:n]))
+	if !ok || pkt.Command != CmdInputEnd {
+		t.Fatalf("typing_end 报文异常: %+v ok=%v", pkt, ok)
+	}
+	if err := e.SendKnock(dst); err != nil {
+		t.Fatalf("SendKnock: %v", err)
+	}
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err = c.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("未收到 knock: %v", err)
+	}
+	pkt, ok = ParsePacket(string(buf[:n]))
+	if !ok || pkt.Command != CmdKnock {
+		t.Fatalf("knock 报文异常: %+v ok=%v", pkt, ok)
+	}
+}
+
+func TestImageCommandProducesUnsupportedFormatNotice(t *testing.T) {
+	e := New(Config{Nick: "我", Hostname: "PC-ME"}, make(chan Event, 8))
+	ch := make(chan Event, 8)
+	e.out = ch
+	e.handlePacket(Packet{PacketNo: 5, Nick: "飞秋用户", Host: "FEIQ-PC", Command: CmdSendImage, Extra: "12345678"}, testAddr)
+	ev := recvEvent(t, ch, EventMessage, time.Second)
+	if ev.MsgID != "5" || ev.Text != "飞秋发来一张图片（图片数据格式暂不支持显示）" {
+		t.Fatalf("图片识别消息异常: %+v", ev)
 	}
 }
 

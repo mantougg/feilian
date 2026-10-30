@@ -44,6 +44,9 @@ func (e *Engine) SendFiles(dst, text string, paths []string) (string, error) {
 		}
 	}
 	extra := EncodeFileExtra(text, entries)
+	if e.isFeiqIP(ip.String()) {
+		extra = EncodeFeiqFileExtra(text, entries)
+	}
 	return e.sendPacket(CmdSendMsg|OptFileAttach|OptSendCheck, extra, &net.UDPAddr{IP: ip, Port: port})
 }
 
@@ -118,6 +121,9 @@ func (e *Engine) handleFileRequest(pkt Packet, from *net.UDPAddr) {
 	if len(entries) == 0 {
 		return
 	}
+	if pkt.HasOpt(OptSendCheck) {
+		_, _ = e.sendPacket(CmdRecvMsg, strconv.FormatUint(pkt.PacketNo, 10), from)
+	}
 	e.upsertPresence(pkt, from)
 	peer := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port}
 	if p, ok := e.peerInfo(peerKey(pkt.Nick, pkt.Host)); ok {
@@ -126,7 +132,7 @@ func (e *Engine) handleFileRequest(pkt Packet, from *net.UDPAddr) {
 	// 请求入 pending 表：AcceptFiles 凭 MsgID（= 请求报文 PacketNo）取回上下文
 	reqID := strconv.FormatUint(pkt.PacketNo, 10)
 	e.xfersMu.Lock()
-	e.pending[reqID] = fileRequest{from: from, peer: peer, entries: entries}
+	e.pending[reqID] = fileRequest{from: from, peer: peer, entries: entries, packetNo: pkt.PacketNo, feiq: e.isFeiqIP(from.IP.String())}
 	e.xfersMu.Unlock()
 	e.emit(Event{
 		Type:  EventFileRequest,
@@ -168,9 +174,11 @@ func (e *Engine) CancelTransfer(reqID string) {
 
 // fileRequest 一次待接受请求的上下文。
 type fileRequest struct {
-	from    *net.UDPAddr
-	peer    Peer
-	entries []FileEntry
+	from     *net.UDPAddr
+	peer     Peer
+	entries  []FileEntry
+	packetNo uint64
+	feiq     bool
 }
 
 // rejectRequest 拒绝请求（UI 不接受时调用，清 pending 表）。
@@ -208,7 +216,7 @@ func (e *Engine) receiveLoop(ctx context.Context, reqID string, req fileRequest,
 			e.emit(Event{Type: EventEngineError, Text: "建目录失败: " + err.Error(), MsgID: reqID, Time: time.Now()})
 			return
 		}
-		if err := e.fetchOne(ctx, addr, fe, dstPath, reqID); err != nil {
+		if err := e.fetchOne(ctx, addr, fe, dstPath, reqID, req); err != nil {
 			if ctx.Err() != nil {
 				e.emit(Event{Type: EventEngineError, Text: "传输已取消", MsgID: reqID, Time: time.Now()})
 			} else {
@@ -221,7 +229,7 @@ func (e *Engine) receiveLoop(ctx context.Context, reqID string, req fileRequest,
 }
 
 // fetchOne 拉取单文件并按 500ms 节流推进度。
-func (e *Engine) fetchOne(ctx context.Context, addr string, fe FileEntry, dstPath, reqID string) error {
+func (e *Engine) fetchOne(ctx context.Context, addr string, fe FileEntry, dstPath, reqID string, req fileRequest) error {
 	f, err := os.Create(dstPath)
 	if err != nil {
 		return err
@@ -241,7 +249,11 @@ func (e *Engine) fetchOne(ctx context.Context, addr string, fe FileEntry, dstPat
 			}
 		},
 	}
-	if _, err := transfer.Fetch(ctx, addr, fe.ID, pw, nil); err != nil {
+	if req.feiq {
+		if _, err := transfer.FetchIPMsg(ctx, addr, req.packetNo, fe.ID, fe.Size, pw, nil); err != nil {
+			return err
+		}
+	} else if _, err := transfer.Fetch(ctx, addr, fe.ID, pw, nil); err != nil {
 		return err
 	}
 	e.emitProgress(reqID, fe, done)

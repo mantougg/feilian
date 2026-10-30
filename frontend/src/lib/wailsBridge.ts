@@ -47,6 +47,7 @@ interface WailsHost {
         GetUnparsedSamples?: () => Promise<string[]>;
         SendText?: (ip: string, text: string) => Promise<string>;
         SendTyping?: (ip: string) => Promise<void>;
+        SendKnock?: (ip: string) => Promise<void>;
         BroadcastText?: (text: string) => Promise<void>;
         GetSelf?: () => Promise<SelfInfo>;
         SetSelf?: (nick: string, dept: string, status: string) => Promise<void>;
@@ -162,6 +163,11 @@ export async function sendText(ip: string, text: string): Promise<string> {
 /** 「正在输入」提示（飞联扩展，尽力而为）。 */
 export async function sendTyping(ip: string): Promise<void> {
   await host().go?.main?.App?.SendTyping?.(ip);
+}
+
+/** 请求对方窗口抖动。 */
+export async function sendKnock(ip: string): Promise<void> {
+  await host().go?.main?.App?.SendKnock?.(ip);
 }
 
 export async function broadcastText(text: string): Promise<void> {

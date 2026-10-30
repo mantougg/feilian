@@ -21,6 +21,7 @@ import {
   Search,
   ArrowLeft,
   CircleAlert,
+  BellRing,
 } from 'lucide-react';
 import { ChatMessage, Contact } from '../types';
 import { history, searchHistory, HistoryMsg } from '../lib/wailsBridge';
@@ -32,6 +33,7 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   onSendMessage: (text: string) => void;
   onTyping?: () => void; // 输入停顿 500ms 触发一次（T-M2-5）
+  onKnock?: () => void;
   onPickFiles?: () => void;    // Wails 选盘发文件（桌面形态）
   onPickFolder?: () => void;   // Wails 选盘发文件夹
   onSendFile: (fileName: string, fileSize: string) => void; // 浏览器形态回退
@@ -56,6 +58,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   messages,
   onSendMessage,
   onTyping,
+  onKnock,
   onPickFiles,
   onPickFolder,
   onSendFile,
@@ -331,6 +334,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 className="absolute right-0 top-8 w-44 bg-[var(--panel)] border border-[var(--line)] shadow-xl rounded-xl py-1 z-50 animate-v1in"
                 role="menu"
               >
+                {onKnock && !contact.isBroadcast && !contact.isGroup && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMoreMenu(false);
+                      onKnock();
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs text-[var(--text)] hover:bg-[var(--panel2)] flex items-center gap-2 cursor-pointer"
+                    role="menuitem"
+                  >
+                    <BellRing className="w-3.5 h-3.5 text-[var(--mut)]" />
+                    <span>请求窗口抖动</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {

@@ -6,6 +6,9 @@
 //
 //	FLTN/1 <space> <fileID> \n
 //	<64KB ~ N 字节二进制数据>…（发满整个文件后关闭）
+//
+//	<packetNo>:<fileID>:<offset>:\n （IPMsg/飞秋；字段十六进制）
+//	<从 offset 开始的裸文件流>
 package transfer
 
 import (
@@ -17,6 +20,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -202,12 +206,12 @@ func (s *Server) serveConn(conn net.Conn) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(30 * time.Second)) // 只约束请求头；开传后放开
 
-	id, err := readRequest(conn)
+	req, err := readRequest(conn)
 	if err != nil {
 		return
 	}
 	s.mu.RLock()
-	sh, ok := s.shares[id]
+	sh, ok := s.shares[req.fileID]
 	s.mu.RUnlock()
 	if !ok {
 		return // 静默关闭：接收方读 0 字节即知失败
@@ -217,6 +221,12 @@ func (s *Server) serveConn(conn net.Conn) {
 		return
 	}
 	defer f.Close()
+	if req.offset < 0 || req.offset > sh.Size {
+		return
+	}
+	if _, err := f.Seek(req.offset, io.SeekStart); err != nil {
+		return
+	}
 
 	conn.SetDeadline(time.Time{}) // 大文件传输不设超时，由取消/断连兜底
 	buf := make([]byte, DefaultChunkSize)
@@ -243,20 +253,41 @@ func (s *Server) serveConn(conn net.Conn) {
 }
 
 // readRequest 解析请求行 "FLTN/1 <fileID>\n"。
-func readRequest(conn net.Conn) (uint32, error) {
+type request struct {
+	fileID uint32
+	offset int64
+}
+
+func readRequest(conn net.Conn) (request, error) {
 	line, err := bufio.NewReader(io.LimitReader(conn, 128)).ReadString('\n')
 	if err != nil {
-		return 0, err
+		return request{}, err
 	}
-	ver, idStr, ok := strings.Cut(strings.TrimSpace(line), " ")
-	if !ok || ver != Magic {
-		return 0, fmt.Errorf("transfer: 非法请求行 %q", line)
+	line = strings.TrimSpace(line)
+	ver, idStr, ok := strings.Cut(line, " ")
+	if ok && ver == Magic {
+		id, err := strconv.ParseUint(idStr, 10, 32)
+		if err != nil {
+			return request{}, fmt.Errorf("transfer: 非法 fileID %q", idStr)
+		}
+		return request{fileID: uint32(id)}, nil
 	}
-	var id uint32
-	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		return 0, fmt.Errorf("transfer: 非法 fileID %q", idStr)
+	parts := strings.Split(line, ":")
+	if len(parts) != 4 || parts[3] != "" {
+		return request{}, fmt.Errorf("transfer: 非法请求行 %q", line)
 	}
-	return id, nil
+	if _, err := strconv.ParseUint(parts[0], 16, 64); err != nil {
+		return request{}, fmt.Errorf("transfer: 非法 packetNo %q", parts[0])
+	}
+	id, err := strconv.ParseUint(parts[1], 16, 32)
+	if err != nil {
+		return request{}, fmt.Errorf("transfer: 非法 fileID %q", parts[1])
+	}
+	offset, err := strconv.ParseInt(parts[2], 16, 64)
+	if err != nil {
+		return request{}, fmt.Errorf("transfer: 非法 offset %q", parts[2])
+	}
+	return request{fileID: uint32(id), offset: offset}, nil
 }
 
 // Fetch 从 ip:port 拉取 fileID 写入 dst（接收侧）。dst 由调用方建好。
@@ -309,4 +340,54 @@ func Fetch(ctx context.Context, addr string, fileID uint32, dst io.Writer, lim L
 			return total, rerr
 		}
 	}
+}
+
+// FetchIPMsg 按 IPMsg/飞秋请求行 file 接收方的裸数据流，并按元数据大小截断。
+func FetchIPMsg(ctx context.Context, addr string, packetNo uint64, fileID uint32, size int64, dst io.Writer, lim Limiter) (int64, error) {
+	if size < 0 {
+		return 0, fmt.Errorf("transfer: 非法文件大小 %d", size)
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp4", addr)
+	if err != nil {
+		return 0, fmt.Errorf("transfer: 连接 %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+	} else {
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+	if _, err := fmt.Fprintf(conn, "%x:%x:0:\n", packetNo, fileID); err != nil {
+		return 0, err
+	}
+	conn.SetDeadline(time.Time{})
+	limited := io.LimitReader(conn, size)
+	buf := make([]byte, DefaultChunkSize)
+	var total int64
+	for total < size {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		want := min(int64(len(buf)), size-total)
+		n, rerr := limited.Read(buf[:want])
+		if n > 0 {
+			if lim != nil {
+				if err := lim.Wait(ctx, n); err != nil {
+					return total, err
+				}
+			}
+			if _, err := dst.Write(buf[:n]); err != nil {
+				return total, err
+			}
+			total += int64(n)
+		}
+		if rerr == io.EOF {
+			return total, fmt.Errorf("transfer: 文件流提前结束（收到 %d/%d 字节）", total, size)
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
+	return total, nil
 }

@@ -48,6 +48,7 @@ import {
   getSelf,
   sendText,
   sendTyping,
+  sendKnock,
   broadcastText,
   setSelf as setSelfProfile,
   sendFiles,
@@ -183,6 +184,15 @@ export default function App() {
     }, 5000);
   };
 
+  const handleTypingEnd = (ev: EngineEvent) => {
+    const convId = `${ev.peer.nick}@${ev.peer.host}`;
+    setConversations((prev) => {
+      const list = prev[convId];
+      if (!list?.some((m) => m.t === 'typing')) return prev;
+      return { ...prev, [convId]: list.filter((m) => m.t !== 'typing') };
+    });
+  };
+
   // 对端回执：按报文序号命中我方消息，标记已送达
   const handleReceipt = (ev: EngineEvent) => {
     if (!ev.msgId) return;
@@ -278,10 +288,18 @@ export default function App() {
 
   // 引擎提示（如端口被占自动避让）：蓝色横幅，20 秒自动消失
   const [engineNotice, setEngineNotice] = useState<string>('');
+  const [windowShaking, setWindowShaking] = useState(false);
   const handleEngineNotice = (ev: EngineEvent) => {
     if (!ev.text) return;
     setEngineNotice(ev.text);
     window.setTimeout(() => setEngineNotice(''), 20000);
+  };
+
+  const handleKnock = (ev: EngineEvent) => {
+    setEngineNotice(`${ev.peer.nick || '联系人'} 请求窗口抖动`);
+    window.setTimeout(() => setEngineNotice(''), 5000);
+    setWindowShaking(true);
+    window.setTimeout(() => setWindowShaking(false), 650);
   };
 
   useEngineEvents({
@@ -292,6 +310,8 @@ export default function App() {
     peer_offline: handlePeerOffline,
     message: handleIncomingMessage,
     typing: handleTyping,
+    typing_end: handleTypingEnd,
+    knock: handleKnock,
     receipt: handleReceipt,
     file_request: handleFileRequest,
     file_progress: handleFileProgress,
@@ -540,6 +560,8 @@ export default function App() {
   return (
     <div
       className={`w-full h-screen bg-[var(--bg)] flex items-center justify-center select-none ${
+        windowShaking ? 'remote-knock' : ''
+      } ${
         isDesktop() ? 'p-0' : 'p-0 md:p-3'
       }`}
     >
@@ -622,6 +644,10 @@ export default function App() {
                   onTyping={() => {
                     const c = contacts[activeConvId];
                     if (c && !c.isBroadcast && !c.isGroup) sendTyping(c.ip).catch(() => undefined);
+                  }}
+                  onKnock={() => {
+                    const c = contacts[activeConvId];
+                    if (c && !c.isBroadcast && !c.isGroup) sendKnock(c.ip).catch(() => undefined);
                   }}
                   onPickFiles={() => handlePickAndSendFiles('file')}
                   onPickFolder={() => handlePickAndSendFiles('folder')}

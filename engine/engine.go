@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -32,6 +33,8 @@ const (
 	EventMessage      = "message"       // 收到文本消息
 	EventReceipt      = "receipt"       // 对方回执（已送达）
 	EventTyping       = "typing"        // 对方正在输入
+	EventTypingEnd    = "typing_end"    // 对方停止输入
+	EventKnock        = "knock"         // 对方请求窗口抖动
 	EventFileRequest  = "file_request"  // 对方发来文件请求
 	EventFileProgress = "file_progress" // 传输进度
 	EventFileDone     = "file_done"     // 传输完成
@@ -48,12 +51,12 @@ type unparsedSample struct {
 
 // Stats 引擎自诊断快照（UI 空态排查入站链路用）。
 type Stats struct {
-	Started    bool   `json:"started"`            // 引擎是否已启动
-	ListenPort int    `json:"listenPort"`         // 实际监听端口（避让后 != 2425）
-	RxPackets  uint64 `json:"rxPackets"`          // 收到的 UDP 报文数（含本机回环）
-	TxPackets  uint64 `json:"txPackets"`          // 发出的报文调用数
-	Peers      int    `json:"peers"`              // 当前在线用户数
-	RxUnparsed uint64 `json:"rxUnparsed"`         // 收到但格式解析失败的报文数
+	Started    bool   `json:"started"`             // 引擎是否已启动
+	ListenPort int    `json:"listenPort"`          // 实际监听端口（避让后 != 2425）
+	RxPackets  uint64 `json:"rxPackets"`           // 收到的 UDP 报文数（含本机回环）
+	TxPackets  uint64 `json:"txPackets"`           // 发出的报文调用数
+	Peers      int    `json:"peers"`               // 当前在线用户数
+	RxUnparsed uint64 `json:"rxUnparsed"`          // 收到但格式解析失败的报文数
 	RawSample  string `json:"rawSample,omitempty"` // 最近一条解析失败报文的 hex 样例（≤96B，排查异构客户端用）
 }
 
@@ -94,31 +97,34 @@ var ErrNotStarted = errors.New("engine: not started")
 
 // Engine 是网络引擎门面，M1 逐任务实现。
 type Engine struct {
-	cfg      Config
-	out      chan Event
-	quit     chan struct{}
-	once     sync.Once
+	cfg  Config
+	out  chan Event
+	quit chan struct{}
+	once sync.Once
 	// conn/listenPort 用原子量：看门狗 rebind 与收发路径并发访问
-	conn       atomic.Pointer[net.UDPConn] // UDP 套接字（Start 建立，Stop 关闭）
-	listenPort atomic.Int32                // 实际监听端口（标准端口被占时避让）
-	rebound    atomic.Bool                 // 看门狗已执行过一次避让（只兜一次）
-	rxPackets  atomic.Uint64               // 收包计数（自诊断）
-	txPackets  atomic.Uint64               // 发包计数（自诊断）
-	rxUnparsed atomic.Uint64               // 解析失败计数（异构客户端排查）
-	rawMu      sync.Mutex                  // 保护 samples
-	samples    []unparsedSample            // 解析失败环形缓冲（≤8 条，UI/日志诊断）
-	bcast      []net.IP                    // 各网段定向广播地址，广播时逐个发送
-	packetNo   atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
-	peers      map[string]Peer
-	peersMu    sync.RWMutex
-	queried    map[string]bool   // 已单播查询过真昵称的飞秋占位 IP（去重）
-	queryMu    sync.Mutex
-	feiqCmdSeen map[uint32]bool  // 已落过完整样例的飞秋命令码（每命令一份样本）
-	tserver    *transfer.Server
-	tlim       transfer.Limiter
-	xfersMu    sync.Mutex
-	xfers      map[string]*xferTask   // 传输任务表，键 = 请求报文 PacketNo 字符串
-	pending    map[string]fileRequest // 待接受的文件请求（键 = 请求报文 PacketNo）
+	conn        atomic.Pointer[net.UDPConn] // UDP 套接字（Start 建立，Stop 关闭）
+	listenPort  atomic.Int32                // 实际监听端口（标准端口被占时避让）
+	rebound     atomic.Bool                 // 看门狗已执行过一次避让（只兜一次）
+	rxPackets   atomic.Uint64               // 收包计数（自诊断）
+	txPackets   atomic.Uint64               // 发包计数（自诊断）
+	rxUnparsed  atomic.Uint64               // 解析失败计数（异构客户端排查）
+	rawMu       sync.Mutex                  // 保护 samples
+	samples     []unparsedSample            // 解析失败环形缓冲（≤8 条，UI/日志诊断）
+	bcast       []net.IP                    // 各网段定向广播地址，广播时逐个发送
+	packetNo    atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
+	peers       map[string]Peer
+	peersMu     sync.RWMutex
+	feiqIPs     map[string]bool // 通过私有心跳识别的飞秋 IPv4
+	queried     map[string]bool // 已单播查询过真昵称的飞秋占位 IP（去重）
+	queryMu     sync.Mutex
+	feiqCmdSeen map[uint32]bool // 已落过完整样例的飞秋命令码（每命令一份样本）
+	tserver     *transfer.Server
+	tlim        transfer.Limiter
+	xfersMu     sync.Mutex
+	xfers       map[string]*xferTask   // 传输任务表，键 = 请求报文 PacketNo 字符串
+	pending     map[string]fileRequest // 待接受的文件请求（键 = 请求报文 PacketNo）
+	typingMu    sync.Mutex
+	typingEnds  map[string]*time.Timer // 飞秋输入状态必须成对发送 0x79/0x7a
 }
 
 // xferTask 一次接收任务（可含多文件）的取消句柄。
@@ -134,7 +140,7 @@ func New(cfg Config, events chan Event) *Engine {
 	if cfg.Status == "" {
 		cfg.Status = StatusOnline
 	}
-	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), queried: make(map[string]bool), feiqCmdSeen: make(map[uint32]bool), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest)}
+	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), feiqIPs: make(map[string]bool), queried: make(map[string]bool), feiqCmdSeen: make(map[uint32]bool), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest), typingEnds: make(map[string]*time.Timer)}
 	return e
 }
 
@@ -168,7 +174,7 @@ func (e *Engine) SetSelf(nick, dept, status string) {
 		e.broadcastPresence(CmdBrEntry)
 	} else if statusChanged {
 		// 仅状态变化走 Absence（IPMsg 语义：在线状态广播）
-		e.broadcastPacket(CmdBrAbsence, e.presenceJSON())
+		e.broadcastPresence(CmdBrAbsence)
 	}
 }
 
@@ -260,9 +266,9 @@ func (e *Engine) watchdogLoop() {
 		return
 	}
 	e.emit(Event{
-		Type:  EventNotice,
-		Text:  fmt.Sprintf("标准端口 %d 收不到任何报文（疑似被其他软件独占收包），已自动改用端口 %d", e.cfg.Port, port),
-		Time:  time.Now(),
+		Type: EventNotice,
+		Text: fmt.Sprintf("标准端口 %d 收不到任何报文（疑似被其他软件独占收包），已自动改用端口 %d", e.cfg.Port, port),
+		Time: time.Now(),
 	})
 }
 
@@ -311,7 +317,7 @@ func (e *Engine) Stats() Stats {
 // Probe 手动重播一次上线探测（UI「重新探测」按钮）：启动时的 Entry 广播
 // 若恰逢网络抖动丢失，靠它补一轮全网 AnsEntry 应答。
 func (e *Engine) Probe() error {
-	return e.broadcastPacket(CmdBrEntry, e.presenceJSON())
+	return e.broadcastPresence(CmdBrEntry)
 }
 
 // Stop 停止引擎：先广播 CmdBrExit 下线包，再结束内部循环并关闭套接字。
@@ -325,6 +331,12 @@ func (e *Engine) Stop() {
 		if e.tserver != nil {
 			e.tserver.Close()
 		}
+		e.typingMu.Lock()
+		for ip, timer := range e.typingEnds {
+			timer.Stop()
+			delete(e.typingEnds, ip)
+		}
+		e.typingMu.Unlock()
 	})
 }
 
@@ -336,15 +348,29 @@ type presenceExtra struct {
 }
 
 // broadcastPresence 广播一条携带本机扩展信息的 Presence 类报文（Entry/Exit/心跳）。
-func (e *Engine) broadcastPresence(cmd uint32) {
+func (e *Engine) broadcastPresence(cmd uint32) error {
 	extra := ""
-	if cmd == CmdBrEntry {
+	if cmd == CmdBrEntry || cmd == CmdBrAbsence {
 		b, err := json.Marshal(presenceExtra{Dept: e.cfg.Dept, Status: e.cfg.Status})
 		if err == nil {
 			extra = string(b)
 		}
 	}
-	e.broadcastPacket(cmd, extra)
+	return e.broadcastCompatiblePacket(cmd, extra)
+}
+
+func (e *Engine) broadcastCompatiblePacket(cmd uint32, extra string) error {
+	if e.conn.Load() == nil {
+		return ErrNotStarted
+	}
+	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextFeiqPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
+	encoded, err := encodeGBKPacket(pkt)
+	if err != nil {
+		// 超出 GBK 字符集时仍保留飞联广播能力；飞秋端对此昵称无法无损显示。
+		encoded = pkt.Encode() + "\x00"
+	}
+	e.txPackets.Add(1)
+	return e.broadcast([]byte(encoded))
 }
 
 // heartbeatLoop 每 heartbeatInterval 广播一次心跳维持在线可见。
@@ -386,8 +412,11 @@ func (e *Engine) readLoop() {
 		e.rxPackets.Add(1)
 		pkt, ok := ParsePacket(string(buf[:n]))
 		if !ok {
-			// 飞秋私有格式（1_lbt 前缀）：只做发现与保活，不进标准解析
+			// 飞秋私有格式（1_lbt 前缀）：解析后复用消息、状态与文件处理路径。
 			if fq, fok := ParseFeiqNative(string(buf[:n])); fok {
+				if isLocalFeiqPacket(fq, from.IP) {
+					continue
+				}
 				e.handleFeiqNative(fq, string(buf[:n]), from)
 				continue
 			}
@@ -404,49 +433,153 @@ func (e *Engine) readLoop() {
 	}
 }
 
-// handleFeiqNative 飞秋私有格式报文（命令 34001 = 心跳/在线等）：收包即
-// 证明在线，建档并刷新 LastSeen。该格式不携带主机名，以源 IP 充当 host
-// （用户表主键因此可区分多台登录名相同的机器）；部门标「飞秋」便于识别。
-// 私有命令语义的深度互通（真昵称/消息收发）属 T-M1-7 范畴。
+func isLocalFeiqPacket(fq FeiqNative, srcIP net.IP) bool {
+	mac := normalizeMAC(fq.MAC)
+	if mac == "" {
+		return false
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if !macPrefixEqual(normalizeMAC(iface.HardwareAddr.String()), mac) {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch a := addr.(type) {
+			case *net.IPNet:
+				ip = a.IP
+			case *net.IPAddr:
+				ip = a.IP
+			}
+			if ip != nil && ip.Equal(srcIP) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeMAC(mac string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' {
+			return r
+		}
+		return -1
+	}, strings.ToUpper(mac))
+}
+
+// macPrefixEqual 比较两个归一化 MAC：等长退化为相等；长度不等时按短串
+// 前缀匹配（短于 10 位 hex 不认，防巧合命中）。飞秋线上实拍只带 10 位
+// hex（文档 §2「FEFFCFAFAC」），而网卡地址恒为 12 位，必须做长度归一。
+func macPrefixEqual(ifaceMAC, packetMAC string) bool {
+	short, long := ifaceMAC, packetMAC
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	return len(short) >= 10 && strings.HasPrefix(long, short)
+}
+
+// handleFeiqNative 处理飞秋私有头的冒号链报文：资料、消息和控制命令
+// 复用 IPMsg 事件路径；旧式抓样缺主机名时仍以源 IP 建占位记录。
 func (e *Engine) handleFeiqNative(fq FeiqNative, raw string, from *net.UDPAddr) {
 	nick := DecodeExtra(fq.Nick)
 	if nick == "" {
 		return
 	}
-	key := peerKey(nick, from.IP.String())
+	ip := from.IP.String()
+	host := DecodeExtra(fq.Host)
+	if host == "" {
+		host = ip // 旧式抓样不含主机名，以 IP 保持原有占位逻辑
+	}
+	dept := DecodeExtra(fq.Dept)
+	if dept == "" {
+		dept = "飞秋"
+	}
+	pkt := Packet{
+		Version: ProtocolVersion, PacketNo: fq.PacketNo, Nick: nick, Host: host,
+		Command: fq.Command, Extra: fq.Extra,
+	}
+	exiting := fq.Command&0xff == CmdBrExit
 	e.peersMu.Lock()
-	// 同 IP 已存在真实资料记录（真昵称升级完成）：只刷新其 LastSeen，
-	// 不再重建占位，否则心跳会把它打回「登录名@IP」反复横跳
-	for k, rp := range e.peers {
-		if rp.IP == from.IP.String() && rp.Host != rp.IP {
-			rp.LastSeen = time.Now()
-			e.peers[k] = rp
-			e.peersMu.Unlock()
-			return
-		}
-	}
-	old, existed := e.peers[key]
-	p := Peer{
-		Nick: nick, Host: from.IP.String(), IP: from.IP.String(), Port: from.Port,
-		Dept: "飞秋", Status: StatusOnline, LastSeen: time.Now(),
-	}
-	if existed {
-		p.Dept, p.Status = old.Dept, old.Status
-	}
-	e.peers[key] = p
+	e.feiqIPs[ip] = true
 	e.peersMu.Unlock()
-	if !existed {
-		e.emit(Event{Type: EventPeerOnline, Peer: p, Time: time.Now()})
-		go e.queryRealNick(from) // 占位昵称是登录名，主动查真昵称
+	upgraded := false
+	if fq.Host == "" {
+		// 旧式心跳不带主机名。此前标准 AnsEntry 已升级为真资料时，
+		// 用它刷新在线状态，避免重新出现「登录名@IP」占位联系人。
+		e.peersMu.Lock()
+		for key, p := range e.peers {
+			if p.IP == ip && p.Host != ip {
+				p.IP, p.Port, p.LastSeen = ip, from.Port, time.Now()
+				e.peers[key] = p
+				pkt.Nick, pkt.Host = p.Nick, p.Host
+				upgraded = true
+				break
+			}
+		}
+		e.peersMu.Unlock()
 	}
-	// 每种飞秋命令码落一份完整样例（诊断样例截断 64B，完整布局是逆向
-	// 私有格式、定位真昵称字段的依据；首包心跳/查询应答都经此留痕）
+	if !upgraded && !exiting {
+		e.upsertFeiqPeer(pkt, from, dept)
+	}
+
+	// 新版心跳已携带真实昵称、主机名和组名；旧抓样只有登录名，仍用标准
+	// BrEntry 向飞秋查询真资料以兼容存量客户端。
+	if fq.Host == "" && !upgraded && !exiting {
+		go e.queryRealNick(from)
+	}
+
+	if fq.Command&0xff == CmdBrEntry && fq.Command&OptFeiqFlag == 0 {
+		// 标准形态的 BrEntry（可带官方选项位）按 IPMsg 语义应答
+		_, _ = e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
+	} else if fq.Command&0xff != CmdBrEntry {
+		e.handlePacket(pkt, from)
+	}
+	// 带 0x600000 标志的定时刷新已在上方更新完整资料，不需每轮回 AnsEntry。
+
+	// 每种飞秋命令码落一份完整样例，便于对照后续抓包。
 	e.queryMu.Lock()
 	seen := e.feiqCmdSeen[fq.Command]
 	e.feiqCmdSeen[fq.Command] = true
 	e.queryMu.Unlock()
 	if !seen {
 		e.pushSample(fmt.Sprintf("飞秋cmd=%d %s", fq.Command, from), raw)
+	}
+}
+
+// upsertFeiqPeer 用飞秋私有心跳携带的完整资料维护联系人。
+func (e *Engine) upsertFeiqPeer(pkt Packet, from *net.UDPAddr, dept string) {
+	key := peerKey(pkt.Nick, pkt.Host)
+	e.peersMu.Lock()
+	var displaced []Peer
+	for oldKey, oldPeer := range e.peers {
+		if oldKey != key && oldPeer.IP == from.IP.String() && oldPeer.Host == oldPeer.IP {
+			delete(e.peers, oldKey)
+			displaced = append(displaced, oldPeer)
+		}
+	}
+	old, existed := e.peers[key]
+	now := time.Now()
+	p := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port, Dept: dept, Status: StatusOnline, LastSeen: now}
+	if existed {
+		p.Status = old.Status
+	}
+	e.peers[key] = p
+	e.peersMu.Unlock()
+	for _, previous := range displaced {
+		e.emit(Event{Type: EventPeerOffline, Peer: previous, Time: now})
+	}
+	if !existed {
+		e.emit(Event{Type: EventPeerOnline, Peer: p, Time: now})
+	} else if old.Nick != p.Nick || old.Host != p.Host || old.Dept != p.Dept || old.Status != p.Status {
+		e.emit(Event{Type: EventPeerUpdate, Peer: p, Time: now})
 	}
 }
 
@@ -521,7 +654,30 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 		e.handleSendMsg(pkt, from)
 		return
 	}
+	// 飞秋私有心跳类标志位（0x600000，文档 §4「6291457」）与 FILEATTACHOPT
+	// 高位重叠（0x600000 ⊃ 0x200000），且 0x400000 单独出现时是官方加密
+	// 选项——只有两位齐置才认定飞秋标志并在分发前整体剥除，否则带标志的
+	// 普通消息会被 HasOpt(FileAttach) 误判成文件附件而静默丢弃
+	if pkt.Command&OptFeiqFlag == OptFeiqFlag {
+		pkt.Command &^= OptFeiqFlag
+	}
 	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup | OptFileAttach) {
+	case CmdInputing:
+		e.refreshPeer(pkt, from)
+		e.emit(Event{Type: EventTyping, Peer: Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}, Time: time.Now()})
+	case CmdInputEnd:
+		e.refreshPeer(pkt, from)
+		e.emit(Event{Type: EventTypingEnd, Peer: Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}, Time: time.Now()})
+	case CmdKnock:
+		e.refreshPeer(pkt, from)
+		e.emit(Event{Type: EventKnock, Peer: Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}, Time: time.Now()})
+	case CmdSendImage:
+		e.refreshPeer(pkt, from)
+		peer := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port}
+		if p, ok := e.peerInfo(peerKey(pkt.Nick, pkt.Host)); ok {
+			peer.Dept, peer.Status = p.Dept, p.Status
+		}
+		e.emit(Event{Type: EventMessage, Peer: peer, MsgID: strconv.FormatUint(pkt.PacketNo, 10), Text: "飞秋发来一张图片（图片数据格式暂不支持显示）", Time: time.Now()})
 	case CmdBrEntry:
 		_, _ = e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
 		e.upsertPresence(pkt, from)
@@ -573,8 +729,51 @@ func (e *Engine) SendTyping(dst string) error {
 	if err != nil {
 		return err
 	}
+	if e.isFeiqIP(ip.String()) {
+		if _, err := e.sendPacket(CmdInputing, "", &net.UDPAddr{IP: ip, Port: port}); err != nil {
+			return err
+		}
+		e.typingMu.Lock()
+		if timer := e.typingEnds[ip.String()]; timer != nil {
+			timer.Stop()
+		}
+		var timer *time.Timer
+		timer = time.AfterFunc(time.Second, func() {
+			e.typingMu.Lock()
+			if e.typingEnds[ip.String()] != timer {
+				e.typingMu.Unlock()
+				return
+			}
+			delete(e.typingEnds, ip.String())
+			e.typingMu.Unlock()
+			_, _ = e.sendPacket(CmdInputEnd, "", &net.UDPAddr{IP: ip, Port: port})
+		})
+		e.typingEnds[ip.String()] = timer
+		e.typingMu.Unlock()
+		return nil
+	}
 	_, err = e.sendPacket(CmdFeiLinkTyping, "", &net.UDPAddr{IP: ip, Port: port})
 	return err
+}
+
+func (e *Engine) isFeiqIP(ip string) bool {
+	e.peersMu.RLock()
+	defer e.peersMu.RUnlock()
+	return e.feiqIPs[ip]
+}
+
+func encodeGBKPacket(pkt Packet) (string, error) {
+	var err error
+	if pkt.Nick, err = EncodeGBK(pkt.Nick); err != nil {
+		return "", err
+	}
+	if pkt.Host, err = EncodeGBK(pkt.Host); err != nil {
+		return "", err
+	}
+	if pkt.Extra, err = EncodeGBK(pkt.Extra); err != nil {
+		return "", err
+	}
+	return pkt.Encode() + "\x00", nil
 }
 
 // handleSendMsg 处理收到的文本消息：先建档/刷新（发消息者必在线，
@@ -622,7 +821,7 @@ func peerKey(nick, host string) string { return nick + "@" + host }
 // parsePresence 解析扩展 JSON；非 JSON 内容（如飞秋报文）静默得到零值。
 func parsePresence(extra string) presenceExtra {
 	var px presenceExtra
-	_ = json.Unmarshal([]byte(extra), &px)
+	_ = json.Unmarshal([]byte(DecodeExtra(extra)), &px)
 	return px
 }
 
@@ -719,6 +918,7 @@ func (e *Engine) removePeer(pkt Packet) {
 	e.peersMu.Lock()
 	p, ok := e.peers[key]
 	delete(e.peers, key)
+	e.removeFeiqIPIfUnusedLocked(p.IP)
 	e.peersMu.Unlock()
 	if ok {
 		p.LastSeen = time.Now()
@@ -751,11 +951,23 @@ func (e *Engine) sweepPeers() int {
 			delete(e.peers, k)
 		}
 	}
+	for _, p := range gone {
+		e.removeFeiqIPIfUnusedLocked(p.IP)
+	}
 	e.peersMu.Unlock()
 	for _, p := range gone {
 		e.emit(Event{Type: EventPeerOffline, Peer: p, Time: time.Now()})
 	}
 	return len(gone)
+}
+
+func (e *Engine) removeFeiqIPIfUnusedLocked(ip string) {
+	for _, p := range e.peers {
+		if p.IP == ip {
+			return
+		}
+	}
+	delete(e.feiqIPs, ip)
 }
 
 // peersSnapshotOf 取锁内某个用户的最新快照（emit 在锁外，取值须在锁内完成）。
@@ -779,28 +991,52 @@ func (e *Engine) sendPacket(cmd uint32, extra string, dst *net.UDPAddr) (string,
 	if conn == nil {
 		return "", ErrNotStarted
 	}
-	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
-	_, err := conn.WriteToUDP([]byte(pkt.Encode()), dst)
+	feiq := e.isFeiqIP(dst.IP.String())
+	var packetNo uint64
+	if feiq {
+		packetNo = e.nextFeiqPacketNo()
+	} else {
+		packetNo = e.nextPacketNo()
+	}
+	pkt := Packet{Version: ProtocolVersion, PacketNo: packetNo, Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
+	raw := pkt.Encode()
+	if feiq {
+		var err error
+		raw, err = encodeGBKPacket(pkt)
+		if err != nil {
+			return "", fmt.Errorf("engine: 飞秋只支持 GBK 文本编码: %w", err)
+		}
+	}
+	_, err := conn.WriteToUDP([]byte(raw), dst)
 	e.txPackets.Add(1)
 	return strconv.FormatUint(pkt.PacketNo, 10), err
 }
 
-// broadcastPacket 广播一条报文到所有网段。
+// broadcastPacket 广播 GBK/NUL 兼容报文到所有网段。
 func (e *Engine) broadcastPacket(cmd uint32, extra string) error {
-	if e.conn.Load() == nil {
-		return ErrNotStarted
-	}
-	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
-	e.txPackets.Add(1)
-	return e.broadcast([]byte(pkt.Encode()))
+	return e.broadcastCompatiblePacket(cmd, extra)
 }
 
 // nextPacketNo 生成进程内唯一的报文序号（以 unix 秒起步，接近 IPMsg 原语义）。
 func (e *Engine) nextPacketNo() uint64 {
-	if e.packetNo.Load() == 0 {
-		e.packetNo.Store(uint64(time.Now().Unix()))
+	return e.reservePacketNo(uint64(time.Now().Unix()))
+}
+
+// 飞秋常用毫秒时间戳作为包序号；与秒级 IPMsg 序号共用原子值并保持单调递增。
+func (e *Engine) nextFeiqPacketNo() uint64 {
+	return e.reservePacketNo(uint64(time.Now().UnixMilli()))
+}
+
+func (e *Engine) reservePacketNo(candidate uint64) uint64 {
+	for {
+		last := e.packetNo.Load()
+		if candidate <= last {
+			candidate = last + 1
+		}
+		if e.packetNo.CompareAndSwap(last, candidate) {
+			return candidate
+		}
 	}
-	return e.packetNo.Add(1)
 }
 
 // SendText 向指定地址发送文本消息（单播，要求回执），返回报文 PacketNo
@@ -813,6 +1049,16 @@ func (e *Engine) SendText(dst, text string) (string, error) {
 	}
 	msgID, err := e.sendPacket(CmdSendMsg|OptSendCheck, text, &net.UDPAddr{IP: ip, Port: port})
 	return msgID, err
+}
+
+// SendKnock 请求指定用户抖动窗口。飞秋使用 IPMSG_KNOCK(0xd1)，飞联也识别该命令。
+func (e *Engine) SendKnock(dst string) error {
+	ip, port, err := e.resolveAddr(dst)
+	if err != nil {
+		return err
+	}
+	_, err = e.sendPacket(CmdKnock, "", &net.UDPAddr{IP: ip, Port: port})
+	return err
 }
 
 // resolveAddr 解析目标地址：显式 "ip:port" 直用；纯 "ip" 时优先取用户表中
@@ -847,7 +1093,7 @@ func (e *Engine) resolveAddr(dst string) (net.IP, int, error) {
 
 // BroadcastText 向全网段广播文本消息。广播不要求回执（避免全网回执风暴）。
 func (e *Engine) BroadcastText(text string) error {
-	return e.broadcastPacket(CmdSendMsg|OptBroadcast, text)
+	return e.broadcastCompatiblePacket(CmdSendMsg|OptBroadcast, text)
 }
 
 // Peers 返回当前在线用户快照（拷贝，调用方可安全读写）。
@@ -954,11 +1200,11 @@ func directedBroadcast(n *net.IPNet) net.IP {
 // broadcast 向本机各网段定向广播地址发送报文，并以受限广播
 // 255.255.255.255 兜底覆盖极端网络环境；只返回首个发送失败。
 // 目的端口集合的构成：
-// - 协议端口 cfg.Port 与实际监听端口 lp（标准部署两者相同只发一份）；
-// - CLI 自选非默认端口时补发 DefaultPort，让标准部署实例收到后按源端口回 AnsEntry；
-// - 标准端口被占避让（lp != cfg.Port）时把 cfg.Port+1..+9 一并补发：
-//   同机多个避让实例监听端口互不相同，不补发则彼此看不见
-//   （代价：每轮广播多发几份 <100B 报文，可忽略）。
+//   - 协议端口 cfg.Port 与实际监听端口 lp（标准部署两者相同只发一份）；
+//   - CLI 自选非默认端口时补发 DefaultPort，让标准部署实例收到后按源端口回 AnsEntry；
+//   - 标准端口被占避让（lp != cfg.Port）时把 cfg.Port+1..+9 一并补发：
+//     同机多个避让实例监听端口互不相同，不补发则彼此看不见
+//     （代价：每轮广播多发几份 <100B 报文，可忽略）。
 func (e *Engine) broadcast(b []byte) error {
 	conn := e.conn.Load()
 	if conn == nil {

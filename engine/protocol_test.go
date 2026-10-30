@@ -43,6 +43,13 @@ func TestParseToleratesEmptyExtra(t *testing.T) {
 	}
 }
 
+func TestParseToleratesNULTerminator(t *testing.T) {
+	q, ok := ParsePacket("1:7:a:b:32:内容\x00\x00")
+	if !ok || q.Extra != "内容" {
+		t.Fatalf("NUL 结尾报文解析异常: %+v ok=%v", q, ok)
+	}
+}
+
 func TestParseMalformed(t *testing.T) {
 	for _, raw := range []string{"", "abc", "1:2:a", "1:x:a:b:32:m", "1:2:a:b:zz:m"} {
 		if _, ok := ParsePacket(raw); ok {

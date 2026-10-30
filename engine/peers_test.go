@@ -131,7 +131,7 @@ func TestSetSelfBroadcast(t *testing.T) {
 			break
 		}
 	}
-	if pkt.Nick != "新名" {
-		t.Fatalf("Entry 昵称 = %q", pkt.Nick)
+	if got := DecodeExtra(pkt.Nick); got != "新名" {
+		t.Fatalf("Entry 昵称 = %q", got)
 	}
 }

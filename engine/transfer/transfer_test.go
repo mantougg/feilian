@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,6 +40,43 @@ func TestFetchRoundTrip(t *testing.T) {
 	}
 	if n != int64(len(payload)) || !bytes.Equal(got.Bytes(), payload) {
 		t.Fatalf("内容不一致: n=%d want=%d", n, len(payload))
+	}
+}
+
+func TestIPMsgFetchAndOffsetRequest(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "feiq.bin")
+	payload := []byte("0123456789")
+	if err := os.WriteFile(src, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	if err := srv.ShareWithID(10, src); err != nil {
+		t.Fatal(err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", srv.Port())
+
+	var got bytes.Buffer
+	n, err := FetchIPMsg(context.Background(), addr, 0x1234, 10, int64(len(payload)), &got, nil)
+	if err != nil || n != int64(len(payload)) || !bytes.Equal(got.Bytes(), payload) {
+		t.Fatalf("IPMsg 拉取异常: n=%d err=%v data=%q", n, err, got.Bytes())
+	}
+
+	conn, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprint(conn, "1234:a:5:\n"); err != nil {
+		t.Fatal(err)
+	}
+	suffix, err := io.ReadAll(conn)
+	if err != nil || string(suffix) != "56789" {
+		t.Fatalf("偏移请求异常: data=%q err=%v", suffix, err)
 	}
 }
 

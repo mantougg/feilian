@@ -33,6 +33,7 @@ const (
 	OptMulticast  uint32 = 0x00000800 // 组播
 	OptNoPopup    uint32 = 0x00001000 // 收到不弹窗
 	OptFileAttach uint32 = 0x00200000 // 附加文件信息（M3 文件传输用）
+	OptFeiqFlag   uint32 = 0x00600000 // 飞秋私有心跳/状态包标志（文档 §4「6291457 = 0x600001」），分发时按选项位剥除
 )
 
 // 飞联自定义扩展命令码：仅飞联之间识别，
@@ -42,6 +43,14 @@ const (
 const (
 	CmdFeiLinkTyping   uint32 = 0x00001001 // 正在输入
 	CmdFeiLinkGroupMsg uint32 = 0x00001002 // 群聊消息
+)
+
+// 飞秋公开使用的 IPMsg 命令扩展。
+const (
+	CmdInputing  uint32 = 0x00000079 // 正在输入
+	CmdInputEnd  uint32 = 0x0000007a // 停止输入
+	CmdSendImage uint32 = 0x000000c0 // 图片（数据格式尚未兼容）
+	CmdKnock     uint32 = 0x000000d1 // 窗口抖动
 )
 
 // Packet 是一条 IPMsg 报文。
@@ -65,6 +74,7 @@ func (p Packet) Encode() string {
 // ParsePacket 解析一条线上报文；格式非法时返回 false。
 // 兼容 extra 为空（报文以第 5 个冒号结尾、无内容）的情况。
 func ParsePacket(raw string) (Packet, bool) {
+	raw = strings.TrimRight(raw, "\x00\r\n")
 	parts := strings.SplitN(raw, ":", 6)
 	if len(parts) < 5 {
 		return Packet{}, false
@@ -96,17 +106,21 @@ func (p Packet) HasOpt(opt uint32) bool { return p.Command&opt == opt }
 // 标记）。飞秋在标准 IPMsg 之外持续广播自有格式的心跳/状态包。
 const feiqNativePrefix = "1_lbt"
 
-// FeiqNative 是飞秋私有格式报文的解析结果（发现用途，字段按需取用）。
-// 线上格式（# 分隔，云桌面实拍样例）：
+// FeiqNative 是飞秋私有格式报文的解析结果。
+// 新版线上格式：
 //
-//	1_lbt6_03#128#FEFFCFAFAC#0#34001#9:17933#c3456:Administrator#:…
+//	1_lbt6_03#128#FEFFCFAFAC#0#0#0#4001#9:1793326334373:Administrator#:YANFA0223:6291457:昵称\x00部门\x00
 //
-// 字段个数/长度随版本浮动，解析只取两点：命令码（紧邻 "9:" 开头字段
-// 之前的一段）与昵称（倒数第二个 ':' 到其后首个 '#' 之间的片段；
-// 昵称实为 Windows 登录名，多台同名机器由引擎按源 IP 区分）。
+// 字段含义遵循 docs/飞秋-私有协议分析.md §2-§4；旧式 # 分隔抓样继续兼容。
 type FeiqNative struct {
-	Command uint32
-	Nick    string
+	PacketNo uint64
+	Command  uint32
+	MAC      string
+	Login    string
+	Nick     string
+	Host     string
+	Dept     string
+	Extra    string
 }
 
 // ParseFeiqNative 解析飞秋私有格式报文；非该格式返回 false。
@@ -115,6 +129,71 @@ func ParseFeiqNative(raw string) (FeiqNative, bool) {
 	if !strings.HasPrefix(raw, feiqNativePrefix) {
 		return FeiqNative{}, false
 	}
+	if fq, ok := parseFeiqColonPacket(raw); ok {
+		return fq, true
+	}
+	return parseFeiqLegacyPacket(raw)
+}
+
+// 飞秋新格式仍使用 IPMsg 的六段冒号链，私有 version 只是在首段附加 # 字段。
+func parseFeiqColonPacket(raw string) (FeiqNative, bool) {
+	raw = strings.TrimRight(raw, "\x00\r\n")
+	parts := strings.SplitN(raw, ":", 6)
+	if len(parts) < 5 || !strings.HasPrefix(parts[0], feiqNativePrefix) {
+		return FeiqNative{}, false
+	}
+	packetNo, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return FeiqNative{}, false
+	}
+	command, err := strconv.ParseUint(parts[4], 10, 32)
+	if err != nil {
+		return FeiqNative{}, false
+	}
+	extra := ""
+	if len(parts) == 6 {
+		extra = parts[5]
+	}
+	versionFields := strings.Split(parts[0], "#")
+	mac := ""
+	if len(versionFields) > 2 {
+		mac = versionFields[2]
+	}
+	login, nick := parts[2], ""
+	if i := strings.IndexByte(login, '#'); i >= 0 {
+		if i+1 < len(login) {
+			nick = login[i+1:]
+		}
+		login = login[:i]
+	}
+	values := strings.Split(extra, "\x00")
+	if nick == "" && len(values) > 0 {
+		nick = values[0]
+	}
+	dept := ""
+	if len(values) > 1 {
+		dept = values[1]
+	}
+	if nick == "" {
+		nick = login
+	}
+	if nick == "" || parts[3] == "" {
+		return FeiqNative{}, false
+	}
+	return FeiqNative{
+		PacketNo: packetNo,
+		Command:  uint32(command),
+		MAC:      mac,
+		Login:    login,
+		Nick:     nick,
+		Host:     parts[3],
+		Dept:     dept,
+		Extra:    extra,
+	}, true
+}
+
+// 兼容仓库中早期真机抓样记录的 # 分隔旧布局，升级期间不丢发现能力。
+func parseFeiqLegacyPacket(raw string) (FeiqNative, bool) {
 	fields := strings.Split(raw, "#")
 	cmdIdx := -1
 	for i, f := range fields {
@@ -145,5 +224,5 @@ func ParseFeiqNative(raw string) (FeiqNative, bool) {
 	if nick == "" {
 		return FeiqNative{}, false
 	}
-	return FeiqNative{Command: uint32(cmd), Nick: nick}, true
+	return FeiqNative{Command: uint32(cmd), Login: nick, Nick: nick}, true
 }

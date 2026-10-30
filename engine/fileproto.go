@@ -11,6 +11,7 @@ package engine
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -89,14 +90,91 @@ func EncodeFileExtra(text string, entries []FileEntry) string {
 // DecodeFileExtra 拆解带附件的 extra；无 \0 时按纯文本处理（空条目列表）。
 func DecodeFileExtra(extra string) (text string, entries []FileEntry) {
 	parts := strings.Split(extra, "\x00")
-	text = parts[0]
+	text = DecodeExtra(parts[0])
 	for _, p := range parts[1:] {
-		if p == "" {
-			continue
-		}
-		if fe, ok := decodeFileEntry(p); ok {
-			entries = append(entries, fe)
+		feiqFormat := strings.Contains(p, "\a")
+		for _, item := range strings.Split(p, "\a") {
+			if item == "" {
+				continue
+			}
+			if feiqFormat {
+				if fe, ok := decodeFeiqFileEntry(item); ok {
+					entries = append(entries, fe)
+				}
+				continue
+			}
+			if fe, ok := decodeFileEntry(item); ok {
+				entries = append(entries, fe)
+			} else if fe, ok := decodeFeiqFileEntry(item); ok {
+				entries = append(entries, fe)
+			}
 		}
 	}
 	return text, entries
+}
+
+// EncodeFeiqFileExtra 按飞秋文件通知格式序列化：消息\0条目\a条目\a。
+func EncodeFeiqFileExtra(text string, entries []FileEntry) string {
+	items := make([]string, 0, len(entries))
+	for _, fe := range entries {
+		fileType := uint32(1)
+		if fe.IsDir() {
+			fileType = 2
+		}
+		name := fe.Name
+		if fe.RelPath != "" {
+			name = strings.TrimSuffix(fe.RelPath, "/")
+		}
+		name = strings.ReplaceAll(name, ":", "::")
+		items = append(items, fmt.Sprintf("%d:%s:%x:%x:%x", fe.ID, name, fe.Size, fe.MTime, fileType))
+	}
+	if len(items) == 0 {
+		return text
+	}
+	return text + "\x00" + strings.Join(items, "\a") + "\a"
+}
+
+// 飞秋文件清单用十进制 fileID，size/mtime/type 使用十六进制，名字中的冒号写作 ::。
+func decodeFeiqFileEntry(s string) (FileEntry, bool) {
+	idEnd := strings.IndexByte(s, ':')
+	if idEnd < 1 {
+		return FileEntry{}, false
+	}
+	id, err := strconv.ParseUint(s[:idEnd], 10, 32)
+	if err != nil {
+		return FileEntry{}, false
+	}
+	rest := s[idEnd+1:]
+	fileTypeEnd := strings.LastIndexByte(rest, ':')
+	if fileTypeEnd < 0 {
+		return FileEntry{}, false
+	}
+	mtimeEnd := strings.LastIndexByte(rest[:fileTypeEnd], ':')
+	if mtimeEnd < 0 {
+		return FileEntry{}, false
+	}
+	sizeEnd := strings.LastIndexByte(rest[:mtimeEnd], ':')
+	if sizeEnd < 0 {
+		return FileEntry{}, false
+	}
+	name := strings.ReplaceAll(rest[:sizeEnd], "::", ":")
+	size, e1 := strconv.ParseInt(rest[sizeEnd+1:mtimeEnd], 16, 64)
+	mtime, e2 := strconv.ParseInt(rest[mtimeEnd+1:fileTypeEnd], 16, 64)
+	typ, e3 := strconv.ParseUint(rest[fileTypeEnd+1:], 16, 32)
+	if e1 != nil || e2 != nil || e3 != nil || name == "" || (typ != 1 && typ != 2) {
+		return FileEntry{}, false
+	}
+	name = DecodeExtra(name)
+	name = strings.ReplaceAll(name, `\`, "/")
+	fe := FileEntry{ID: uint32(id), Size: size, MTime: mtime, Attr: FileAttrRegular}
+	if typ == 2 {
+		fe.Attr = FileAttrDir
+	}
+	if strings.Contains(name, "/") {
+		fe.RelPath = strings.TrimPrefix(name, "./")
+		fe.Name = path.Base(fe.RelPath)
+	} else {
+		fe.Name = name
+	}
+	return fe, true
 }
