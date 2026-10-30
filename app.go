@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"feilian/config"
 	"feilian/engine"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -27,14 +28,38 @@ type SelfInfo struct {
 type App struct {
 	ctx         context.Context
 	engine      *engine.Engine
-	recvDirPath string // 接收目录（设置覆盖；空 = 默认下载目录）
+	cfgData     config.Data // 本地配置快照（T-M4-5 持久化）
+	recvDirPath string      // 接收目录（设置覆盖；空 = 默认下载目录）
 }
 
 func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.loadConfig()
 	a.startEngine()
+}
+
+// loadConfig 读取本地配置：昵称/部门/状态注入引擎，主题/接收目录等留给前端拉取。
+func (a *App) loadConfig() {
+	d, err := config.Load()
+	if err != nil {
+		log.Printf("配置损坏，按默认值运行: %v", err)
+	}
+	a.cfgData = d
+	a.recvDirPath = d.RecvDir
+}
+
+// saveConfig 把引擎当前资料与设置快照落盘。
+func (a *App) saveConfig() {
+	if a.engine != nil {
+		c := a.engine.Self()
+		a.cfgData.Nick, a.cfgData.Dept, a.cfgData.Status = c.Nick, c.Dept, c.Status
+	}
+	a.cfgData.RecvDir = a.recvDirPath
+	if err := config.Save(a.cfgData); err != nil {
+		log.Printf("配置保存失败: %v", err)
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -51,11 +76,22 @@ func (a *App) startEngine() {
 		hostname = "unknown-host"
 	}
 	events := make(chan engine.Event, 64)
-	a.engine = engine.New(engine.Config{
-		Nick:     hostname, // M1 默认昵称 = 主机名，T-M2-6 起由 UI 修改
+	cfg := engine.Config{
 		Hostname: hostname,
 		Status:   engine.StatusOnline,
-	}, events)
+	}
+	// 配置里有昵称用配置的，否则首启用主机名并落盘
+	if a.cfgData.Nick != "" {
+		cfg.Nick, cfg.Dept, cfg.Status = a.cfgData.Nick, a.cfgData.Dept, a.cfgData.Status
+	} else {
+		cfg.Nick = hostname
+		a.cfgData.Nick = hostname
+		a.saveConfig()
+	}
+	if cfg.Status != engine.StatusOnline && cfg.Status != engine.StatusBusy && cfg.Status != engine.StatusAway {
+		cfg.Status = engine.StatusOnline
+	}
+	a.engine = engine.New(cfg, events)
 	if err := a.engine.Start(); err != nil {
 		log.Printf("引擎启动失败: %v", err)
 		return
@@ -140,8 +176,12 @@ func (a *App) OpenPath(path string) error { return execOpen(path) }
 // GetRecvDir 当前接收目录（设置页展示与修改，T-M4-5 持久化）。
 func (a *App) GetRecvDir() string { return a.recvDir() }
 
-// SetRecvDir 设置接收目录（内存态，T-M4-5 落盘）。
-func (a *App) SetRecvDir(dir string) { a.recvDirPath = dir }
+// SetRecvDir 设置接收目录并持久化。
+func (a *App) SetRecvDir(dir string) {
+	a.recvDirPath = dir
+	a.cfgData.RecvDir = dir
+	a.saveConfig()
+}
 
 // recvDir 返回接收目录：设置值优先，缺省 %USERPROFILE%\Downloads\飞联接收。
 func (a *App) recvDir() string {
@@ -216,9 +256,10 @@ func localIP() string {
 	return ""
 }
 
-// SetSelf 修改我的资料并全网广播（引擎侧留空字段保持不变）。
+// SetSelf 修改我的资料并全网广播，随即持久化。
 func (a *App) SetSelf(nick, dept, status string) {
 	if a.engine != nil {
 		a.engine.SetSelf(nick, dept, status)
 	}
+	a.saveConfig()
 }
