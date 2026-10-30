@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"feilian/engine/transfer"
 )
 
 // 用户状态（Peer.Status 取值）。
@@ -48,12 +50,14 @@ type Peer struct {
 
 // Event 是引擎推给 UI 的事件。字段按 Type 取用，其余为零值。
 type Event struct {
-	Type      string    `json:"type"`
-	Peer      Peer      `json:"peer"`
-	MsgID     string    `json:"msgId"` // 我方报文 PacketNo 的字符串形式（回执匹配用）
-	Text      string    `json:"text"`  // 文本内容 / 错误信息
-	Time      time.Time `json:"time"`
-	Broadcast bool      `json:"broadcast"` // 该消息来自局域网广播（CmdSendMsg|OptBroadcast）
+	Type      string      `json:"type"`
+	Peer      Peer        `json:"peer"`
+	MsgID     string      `json:"msgId"` // 我方报文 PacketNo 的字符串形式（回执匹配用）
+	Text      string      `json:"text"`  // 文本内容 / 错误信息 / 落盘路径
+	Time      time.Time   `json:"time"`
+	Broadcast bool        `json:"broadcast"`          // 该消息来自局域网广播（CmdSendMsg|OptBroadcast）
+	Files     []FileEntry `json:"files,omitempty"`    // 文件请求的条目列表（EventFileRequest）
+	Progress  int         `json:"progress,omitempty"` // 传输进度 0-100（EventFileProgress）
 }
 
 // Config 引擎配置（M1 由 app.go 从本地配置读取，M4-T 持久化）。
@@ -79,6 +83,16 @@ type Engine struct {
 	packetNo atomic.Uint64 // 出站报文序号（回执匹配的唯一凭据）
 	peers    map[string]Peer
 	peersMu  sync.RWMutex
+	tserver  *transfer.Server
+	tlim     transfer.Limiter
+	xfersMu  sync.Mutex
+	xfers    map[string]*xferTask   // 传输任务表，键 = 请求报文 PacketNo 字符串
+	pending  map[string]fileRequest // 待接受的文件请求（键 = 请求报文 PacketNo）
+}
+
+// xferTask 一次接收任务（可含多文件）的取消句柄。
+type xferTask struct {
+	cancel context.CancelFunc
 }
 
 // New 创建引擎。events 缓冲建议不小于 64。
@@ -89,11 +103,15 @@ func New(cfg Config, events chan Event) *Engine {
 	if cfg.Status == "" {
 		cfg.Status = StatusOnline
 	}
-	return &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer)}
+	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest)}
+	return e
 }
 
 // Events 返回事件通道（UI 的订阅入口）。
 func (e *Engine) Events() <-chan Event { return e.out }
+
+// SetLimitRate 设置文件传输限速（字节/秒，<=0 不限速）；Start 前调用生效。
+func (e *Engine) SetLimitRate(bytesPerSecond int) { e.tlim = transfer.NewLimiter(bytesPerSecond) }
 
 // Self 返回本机当前资料快照。
 func (e *Engine) Self() Config { return e.cfg }
@@ -124,6 +142,9 @@ func (e *Engine) SetSelf(nick, dept, status string) {
 }
 
 // heartbeatInterval 是心跳周期；offlineTimeout 内收不到任何报文即判离线。
+// DefaultPort 是飞联默认协议端口（UDP 发现 / TCP 文件同号）。
+const DefaultPort = 2425
+
 const (
 	heartbeatInterval = 30 * time.Second
 	offlineTimeout    = 3 * heartbeatInterval // 连续错过 3 次心跳视为异常掉线
@@ -140,6 +161,10 @@ func (e *Engine) Start() error {
 
 	go e.readLoop()
 	go e.sweepLoop()
+	// TCP 文件通道（M3）：失败不阻断 UDP 主链路，仅丢文件能力
+	if ts, err := transfer.NewServer(e.cfg.Port, e.tlim); err == nil {
+		e.tserver = ts
+	}
 	e.broadcastPresence(CmdBrEntry)
 	go e.heartbeatLoop()
 
@@ -153,6 +178,9 @@ func (e *Engine) Stop() {
 		close(e.quit)
 		if e.conn != nil {
 			e.conn.Close()
+		}
+		if e.tserver != nil {
+			e.tserver.Close()
 		}
 	})
 }
@@ -227,7 +255,7 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 		e.handleSendMsg(pkt, from)
 		return
 	}
-	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup) {
+	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup | OptFileAttach) {
 	case CmdBrEntry:
 		_, _ = e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
 		e.upsertPresence(pkt, from)
@@ -240,7 +268,11 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 	case CmdNoOperation:
 		e.refreshPeer(pkt, from)
 	case CmdSendMsg:
-		e.handleSendMsg(pkt, from)
+		if pkt.HasOpt(OptFileAttach) {
+			e.handleFileRequest(pkt, from)
+		} else {
+			e.handleSendMsg(pkt, from)
+		}
 	case CmdRecvMsg:
 		// 回执发送者 = 消息接收者，报文源地址带其真实监听端口；
 		// 建档后我方纯 IP 发送即可查表命中（同机双开端口不同的联调依赖此路径）
@@ -618,6 +650,11 @@ func (e *Engine) broadcast(b []byte) error {
 	ports := []int{e.cfg.Port}
 	if bind := e.conn.LocalAddr().(*net.UDPAddr).Port; bind != e.cfg.Port {
 		ports = append(ports, bind)
+	}
+	// 同机异端口联调约定：非默认端口实例额外向 2425 广播一份——
+	// 默认端口实例收到后按源端口单播 AnsEntry 回来，发现闭环成立
+	if e.cfg.Port != DefaultPort {
+		ports = append(ports, DefaultPort)
 	}
 	var firstErr error
 	for _, ip := range e.bcast {

@@ -116,6 +116,25 @@ func NewServer(port int, lim Limiter) (*Server, error) {
 	return s, nil
 }
 
+// ShareWithID 以指定 fileID 注册共享文件（发送侧条目 ID 需与协议一致）。
+func (s *Server) ShareWithID(id uint32, path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if st.IsDir() {
+		return fmt.Errorf("transfer: %s 是目录，请先展开为文件列表", path)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shares[id] = share{Path: abs, Size: st.Size()}
+	return nil
+}
+
 // Share 注册一个对外共享文件，返回接收方拉取用的 fileID。
 func (s *Server) Share(path string) (uint32, error) {
 	abs, err := filepath.Abs(path)
