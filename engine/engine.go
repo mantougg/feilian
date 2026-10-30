@@ -367,7 +367,7 @@ func (e *Engine) heartbeatLoop() {
 
 // readLoop 阻塞读取 UDP 报文并分发，直到套接字关闭。
 func (e *Engine) readLoop() {
-	buf := make([]byte, 4096)
+	buf := make([]byte, 8192) // 飞秋原生报文可能比标准 IPMsg 长，留足余量
 	for {
 		conn := e.conn.Load()
 		if conn == nil {
@@ -383,6 +383,11 @@ func (e *Engine) readLoop() {
 		e.rxPackets.Add(1)
 		pkt, ok := ParsePacket(string(buf[:n]))
 		if !ok {
+			// 飞秋私有格式（1_lbt 前缀）：只做发现与保活，不进标准解析
+			if fq, fok := ParseFeiqNative(string(buf[:n])); fok {
+				e.handleFeiqNative(fq, from)
+				continue
+			}
 			e.noteUnparsed(buf[:n], from)
 			continue
 		}
@@ -393,6 +398,32 @@ func (e *Engine) readLoop() {
 			continue
 		}
 		e.handlePacket(pkt, from)
+	}
+}
+
+// handleFeiqNative 飞秋私有格式报文（命令 34001 = 心跳/在线等）：收包即
+// 证明在线，建档并刷新 LastSeen。该格式不携带主机名，以源 IP 充当 host
+// （用户表主键因此可区分多台登录名相同的机器）；部门标「飞秋」便于识别。
+// 私有命令语义的深度互通（真昵称/消息收发）属 T-M1-7 范畴。
+func (e *Engine) handleFeiqNative(fq FeiqNative, from *net.UDPAddr) {
+	nick := DecodeExtra(fq.Nick)
+	if nick == "" {
+		return
+	}
+	key := peerKey(nick, from.IP.String())
+	p := Peer{
+		Nick: nick, Host: from.IP.String(), IP: from.IP.String(), Port: from.Port,
+		Dept: "飞秋", Status: StatusOnline, LastSeen: time.Now(),
+	}
+	e.peersMu.Lock()
+	old, existed := e.peers[key]
+	if existed {
+		p.Dept, p.Status = old.Dept, old.Status
+	}
+	e.peers[key] = p
+	e.peersMu.Unlock()
+	if !existed {
+		e.emit(Event{Type: EventPeerOnline, Peer: p, Time: time.Now()})
 	}
 }
 

@@ -91,3 +91,59 @@ func ParsePacket(raw string) (Packet, bool) {
 
 // HasOpt 报告报文命令码是否携带全部指定选项位。
 func (p Packet) HasOpt(opt uint32) bool { return p.Command&opt == opt }
+
+// feiqNativePrefix 是飞秋私有报文的特征前缀（lbt = 萝卜头，飞秋作者团队
+// 标记）。飞秋在标准 IPMsg 之外持续广播自有格式的心跳/状态包。
+const feiqNativePrefix = "1_lbt"
+
+// FeiqNative 是飞秋私有格式报文的解析结果（发现用途，字段按需取用）。
+// 线上格式（# 分隔，云桌面实拍样例）：
+//
+//	1_lbt6_03#128#FEFFCFAFAC#0#34001#9:17933#c3456:Administrator#:…
+//
+// 字段个数/长度随版本浮动，解析只取两点：命令码（紧邻 "9:" 开头字段
+// 之前的一段）与昵称（倒数第二个 ':' 到其后首个 '#' 之间的片段；
+// 昵称实为 Windows 登录名，多台同名机器由引擎按源 IP 区分）。
+type FeiqNative struct {
+	Command uint32
+	Nick    string
+}
+
+// ParseFeiqNative 解析飞秋私有格式报文；非该格式返回 false。
+// 只在标准 IPMsg 解析失败后调用（前缀 "1_lbt" 与标准报文 "1:…" 天然不冲突）。
+func ParseFeiqNative(raw string) (FeiqNative, bool) {
+	if !strings.HasPrefix(raw, feiqNativePrefix) {
+		return FeiqNative{}, false
+	}
+	fields := strings.Split(raw, "#")
+	cmdIdx := -1
+	for i, f := range fields {
+		if strings.HasPrefix(f, "9:") && i > 0 {
+			cmdIdx = i - 1
+			break
+		}
+	}
+	if cmdIdx < 0 {
+		return FeiqNative{}, false
+	}
+	cmd, err := strconv.ParseUint(fields[cmdIdx], 10, 32)
+	if err != nil {
+		return FeiqNative{}, false
+	}
+	// 昵称在命令码字段之后的「9:」链里：把命令码后的原文按 ':' 切，
+	// 第 3 段（下标 2，前两段为 "9" 与时间戳/序号）即昵称，截掉其后
+	// 可能并排的 '#' 后续字段。64B 截断的各种残尾形态均可命中。
+	rest := strings.Join(fields[cmdIdx+1:], "#")
+	segs := strings.SplitN(rest, ":", 4)
+	if len(segs) < 3 {
+		return FeiqNative{}, false
+	}
+	nick := segs[2]
+	if i := strings.IndexByte(nick, '#'); i >= 0 {
+		nick = nick[:i]
+	}
+	if nick == "" {
+		return FeiqNative{}, false
+	}
+	return FeiqNative{Command: uint32(cmd), Nick: nick}, true
+}
