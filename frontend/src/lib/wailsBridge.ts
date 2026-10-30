@@ -44,6 +44,7 @@ interface WailsHost {
         GetPeers?: () => Promise<EngineEvent['peer'][]>;
         EngineStats?: () => Promise<EngineStats>;
         ProbePeers?: () => Promise<void>;
+        GetUnparsedSamples?: () => Promise<string[]>;
         SendText?: (ip: string, text: string) => Promise<string>;
         SendTyping?: (ip: string) => Promise<void>;
         BroadcastText?: (text: string) => Promise<void>;
@@ -122,6 +123,11 @@ export async function getEngineStats(): Promise<EngineStats> {
 /** 手动重播上线广播（空态「重新探测」按钮）。 */
 export async function probePeers(): Promise<void> {
   await host().go?.main?.App?.ProbePeers?.();
+}
+
+/** 最近解析失败报文的诊断行（时间/来源/hex）；浏览器形态返回空。 */
+export async function getUnparsedSamples(): Promise<string[]> {
+  return (await host().go?.main?.App?.GetUnparsedSamples?.()) ?? [];
 }
 
 export interface SelfInfo {

@@ -18,7 +18,7 @@ import {
 } from '../types';
 import { STATUS_COLORS, STATUS_LABELS } from '../data/mockData';
 import { getConversationPreview, groupContactsByDept } from '../utils/chatLogic';
-import { getEngineStats, probePeers, EngineStats } from '../lib/wailsBridge';
+import { getEngineStats, getUnparsedSamples, probePeers, EngineStats } from '../lib/wailsBridge';
 
 interface MiddleColumnProps {
   activeView: ActiveView;
@@ -61,12 +61,16 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
   // 引擎自诊断轮询（10s）：空态展示监听端口与收发包数，
   // 用户无需工具即可判断「收不到任何包」还是「收到但无对端」
   const [stats, setStats] = useState<EngineStats | null>(null);
+  const [samples, setSamples] = useState<string[]>([]);
+  const [copied, setCopied] = useState(false);
   const pullStatsRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     let alive = true;
     const pull = async () => {
       const s = await getEngineStats();
-      if (alive) setStats(s);
+      if (!alive) return;
+      setStats(s);
+      if (s.rxUnparsed > 0) setSamples(await getUnparsedSamples());
     };
     pullStatsRef.current = pull;
     pull();
@@ -76,6 +80,32 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
       window.clearInterval(timer);
     };
   }, []);
+
+  // 复制诊断信息（统计 + 样例）：Wails webview 可能禁用 async clipboard，
+  // 先试标准 API，失败退回 execCommand 兜底
+  const handleCopyDiag = () => {
+    const lines = [
+      `引擎 UDP:${stats?.listenPort ?? '-'} 收:${stats?.rxPackets ?? '-'} 发:${stats?.txPackets ?? '-'} 未解析:${stats?.rxUnparsed ?? '-'}`,
+      ...samples,
+    ];
+    const text = lines.join('\n');
+    const done = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    };
+    navigator.clipboard
+      ?.writeText(text)
+      .then(done)
+      .catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        done();
+      });
+  };
 
   // Render status badge dot
   const renderStatusDot = (status: string) => {
@@ -340,10 +370,10 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                     <br />
                     已收 {stats.rxPackets} 包 / 已发 {stats.txPackets} 包
                     {stats.rxUnparsed > 0 && (
-                      <span title={`hex 样例: ${stats.rawSample || '—'}`}>
+                      <>
                         <br />
-                        其中 {stats.rxUnparsed} 包无法解析（异构客户端私有格式）
-                      </span>
+                        其中 <span className="text-[var(--acc)] font-medium">{stats.rxUnparsed}</span> 包无法解析
+                      </>
                     )}
                   </p>
                 ) : (
@@ -356,16 +386,43 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                     长时间 0 收包：请放行防火墙入站 UDP 2425
                   </p>
                 )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    probePeers();
-                    window.setTimeout(() => pullStatsRef.current?.(), 600);
-                  }}
-                  className="mt-2.5 px-3 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[10px] text-[var(--text)] hover:bg-[var(--accsoft)] hover:border-[var(--acc)] cursor-pointer"
-                >
-                  重新探测
-                </button>
+
+                {/* 诊断样例：内联展示最近无法解析的报文（来源 + hex），
+                    供截图/复制远程排查格式兼容问题 */}
+                {samples.length > 0 && (
+                  <div className="mt-2.5 p-2 rounded-lg bg-[var(--panel)] border border-[var(--line)] text-left">
+                    {samples.slice(0, 3).map((s, i) => (
+                      <p key={i} className="text-[9px] leading-relaxed text-[var(--mut)] font-mono break-all">
+                        {s}
+                      </p>
+                    ))}
+                    {samples.length > 3 && (
+                      <p className="text-[9px] text-[var(--mut)] opacity-70">…等 {samples.length} 条</p>
+                    )}
+                  </div>
+                )}
+
+                <div className="mt-2.5 flex items-center justify-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      probePeers();
+                      window.setTimeout(() => pullStatsRef.current?.(), 600);
+                    }}
+                    className="px-3 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[10px] text-[var(--text)] hover:bg-[var(--accsoft)] hover:border-[var(--acc)] cursor-pointer"
+                  >
+                    重新探测
+                  </button>
+                  {samples.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleCopyDiag}
+                      className="px-3 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[10px] text-[var(--text)] hover:bg-[var(--accsoft)] hover:border-[var(--acc)] cursor-pointer"
+                    >
+                      {copied ? '已复制' : '复制诊断'}
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>

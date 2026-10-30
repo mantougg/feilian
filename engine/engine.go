@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"sync"
@@ -37,6 +38,13 @@ const (
 	EventEngineError  = "error"         // 引擎错误（发往 UI 提示）
 	EventNotice       = "notice"        // 引擎提示（如端口避让，UI 非阻断告知）
 )
+
+// unparsedSample 一次解析失败报文的诊断记录。
+type unparsedSample struct {
+	Time time.Time
+	From string // 源 ip:port
+	Hex  string // 报文前 64 字节 hex
+}
 
 // Stats 引擎自诊断快照（UI 空态排查入站链路用）。
 type Stats struct {
@@ -97,8 +105,8 @@ type Engine struct {
 	rxPackets  atomic.Uint64               // 收包计数（自诊断）
 	txPackets  atomic.Uint64               // 发包计数（自诊断）
 	rxUnparsed atomic.Uint64               // 解析失败计数（异构客户端排查）
-	rawMu      sync.Mutex                  // 保护 rawSample
-	rawSample  string                      // 最近一条解析失败报文的 hex 样例
+	rawMu      sync.Mutex                  // 保护 samples
+	samples    []unparsedSample            // 解析失败环形缓冲（≤8 条，UI/日志诊断）
 	bcast      []net.IP                    // 各网段定向广播地址，广播时逐个发送
 	packetNo   atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
 	peers      map[string]Peer
@@ -281,8 +289,11 @@ func (e *Engine) rebind(port int) error {
 // Stats 返回引擎自诊断快照（UI 空态展示"收到 N 包"帮助判断入站链路）。
 func (e *Engine) Stats() Stats {
 	e.rawMu.Lock()
-	sample := e.rawSample
-	e.rawMu.Unlock()
+	defer e.rawMu.Unlock()
+	var sample string
+	if n := len(e.samples); n > 0 {
+		sample = e.samples[n-1].Hex
+	}
 	return Stats{
 		Started:    e.conn.Load() != nil,
 		ListenPort: int(e.listenPort.Load()),
@@ -372,7 +383,7 @@ func (e *Engine) readLoop() {
 		e.rxPackets.Add(1)
 		pkt, ok := ParsePacket(string(buf[:n]))
 		if !ok {
-			e.noteUnparsed(buf[:n])
+			e.noteUnparsed(buf[:n], from)
 			continue
 		}
 		// 昵称/主机名按编码探测转 UTF-8（飞秋 GBK），后续建档/展示/主键统一
@@ -385,17 +396,34 @@ func (e *Engine) readLoop() {
 	}
 }
 
-// noteUnparsed 记录解析失败报文：计数 + 保留最近一条 hex 样例（截断 96 字节），
-// 供 UI 空态与远程排查判断异构客户端（飞秋/飞鸽）的线上格式。
-func (e *Engine) noteUnparsed(raw []byte) {
+// noteUnparsed 记录解析失败报文：计数 + 环形缓冲最近 8 条（时间/源地址/
+// 前 64 字节 hex）+ 日志，供 UI 空态与远程排查判断流量来自异构客户端
+// （飞秋/飞鸽）还是网络里的其他广播源（如云桌面底层）。
+func (e *Engine) noteUnparsed(raw []byte, from *net.UDPAddr) {
 	e.rxUnparsed.Add(1)
-	const max = 96
+	const max = 64
 	if len(raw) > max {
 		raw = raw[:max]
 	}
+	s := unparsedSample{Time: time.Now(), From: from.String(), Hex: fmt.Sprintf("%x", raw)}
+	log.Printf("无法解析的报文 from %s (%d B): %s", s.From, len(raw), s.Hex)
 	e.rawMu.Lock()
-	e.rawSample = fmt.Sprintf("%x", raw)
+	e.samples = append(e.samples, s)
+	if len(e.samples) > 8 {
+		e.samples = e.samples[len(e.samples)-8:]
+	}
 	e.rawMu.Unlock()
+}
+
+// UnparsedSamples 返回最近解析失败报文的诊断行（UI 展示/复制用）。
+func (e *Engine) UnparsedSamples() []string {
+	e.rawMu.Lock()
+	defer e.rawMu.Unlock()
+	out := make([]string, len(e.samples))
+	for i, s := range e.samples {
+		out[i] = fmt.Sprintf("%s 来自 %s: %s", s.Time.Format("15:04:05"), s.From, s.Hex)
+	}
+	return out
 }
 
 // handlePacket 按命令码分发已解析的报文。

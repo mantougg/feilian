@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,16 +101,20 @@ func TestGBKNickDecodedOnReceive(t *testing.T) {
 	}
 }
 
-// 验收：解析失败报文计数并保留 hex 样例（Stats 自诊断可见）。
+// 验收：解析失败报文计数并保留 hex 样例（Stats/样例列表自诊断可见）。
 func TestUnparsedCountedAndSampled(t *testing.T) {
 	e := New(Config{Nick: "我", Hostname: "PC-ME"}, make(chan Event, 8))
-	e.noteUnparsed([]byte{0x81, 0x40, 0xFF, 'A'})
+	e.noteUnparsed([]byte{0x81, 0x40, 0xFF, 'A'}, testAddr)
 	st := e.Stats()
 	if st.RxUnparsed != 1 || st.RawSample == "" {
 		t.Fatalf("计数/样例缺失: %+v", st)
 	}
 	if want := "8140ff41"; st.RawSample != want {
 		t.Fatalf("样例 = %q, want %q", st.RawSample, want)
+	}
+	ss := e.UnparsedSamples()
+	if len(ss) != 1 || !strings.Contains(ss[0], "8140ff41") || !strings.Contains(ss[0], "192.168.1.60") {
+		t.Fatalf("诊断行缺失来源或样例: %v", ss)
 	}
 }
 

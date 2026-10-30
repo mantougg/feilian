@@ -44,11 +44,33 @@ type App struct {
 func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+	a.ctx = a.initLogging(ctx)
 	a.loadConfig()
 	a.openStore()
 	a.startEngine()
 	a.registerHotkeys()
+}
+
+// initLogging 把标准日志重定向到 %LocalAppData%\feilian\feilian.log（追加，
+// 超 2MB 轮换一次）。GUI 形态没有控制台，引擎诊断（如无法解析报文的来源
+// 与 hex 样例）只有落盘才可远程取证。
+func (a *App) initLogging(ctx context.Context) context.Context {
+	dir, err := os.UserConfigDir()
+	if err == nil {
+		dir = filepath.Join(dir, "feilian")
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+			path := filepath.Join(dir, "feilian.log")
+			if st, stErr := os.Stat(path); stErr == nil && st.Size() > 2<<20 {
+				_ = os.Rename(path, path+".old") // 简单轮换：满 2MB 挪走重开
+			}
+			if f, fErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); fErr == nil {
+				log.SetOutput(f)
+				log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+				log.Printf("---- 飞联启动 ----")
+			}
+		}
+	}
+	return ctx
 }
 
 // triggerScreenshot 供热键与前端统一入口：拉底图并通知前端打开截图工具。
@@ -371,6 +393,14 @@ func (a *App) ProbePeers() error {
 		return engine.ErrNotStarted
 	}
 	return a.engine.Probe()
+}
+
+// GetUnparsedSamples 最近解析失败报文的诊断行（时间/来源/hex，供 UI 复制取证）。
+func (a *App) GetUnparsedSamples() []string {
+	if a.engine == nil {
+		return nil
+	}
+	return a.engine.UnparsedSamples()
 }
 
 // SendText 向指定 IP 发送文本消息，返回报文 PacketNo 字符串（回执关联用）。
