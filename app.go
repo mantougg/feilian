@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gen2brain/beeep"
+
 	"feilian/config"
 	"feilian/engine"
 	"feilian/store"
@@ -129,6 +131,9 @@ func (a *App) pumpEvents() {
 
 // recordEvent 把消息类事件落到 SQLite（T-M4-6）。失败仅日志，不影响实时聊天。
 func (a *App) recordEvent(ev engine.Event) {
+	if ev.Type == engine.EventMessage {
+		a.notifyMessage(ev)
+	}
 	if a.db == nil {
 		return
 	}
@@ -346,4 +351,26 @@ func (a *App) SetSelf(nick, dept, status string) {
 		a.engine.SetSelf(nick, dept, status)
 	}
 	a.saveConfig()
+}
+
+// notifyMessage 系统通知（T-M4-3）：仅文本消息；我方勿扰/离开状态不弹（只累计未读）；
+// 开关由配置控制（默认开）。beeep 失败静默（无通知环境不致命）。
+func (a *App) notifyMessage(ev engine.Event) {
+	if !a.cfgData.SystemNotify {
+		return
+	}
+	if self := a.engine.Self(); self.Status == engine.StatusBusy || self.Status == engine.StatusAway {
+		return // 勿扰：不弹，前端照常累计未读
+	}
+	title := "飞联 · " + ev.Peer.Nick
+	if ev.Broadcast {
+		title = "飞联 · 局域网广播"
+	}
+	text := ev.Text
+	if len(text) > 60 {
+		text = text[:60] + "…"
+	}
+	go func() {
+		_ = beeep.Notify(title, text, "build/appicon.png")
+	}()
 }
