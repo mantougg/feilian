@@ -51,8 +51,9 @@ func (a *App) startup(ctx context.Context) {
 	a.registerHotkeys()
 }
 
-// initLogging 把标准日志重定向到 %LocalAppData%\feilian\feilian.log（追加，
-// 超 2MB 轮换一次）。GUI 形态没有控制台，引擎诊断（如无法解析报文的来源
+// initLogging 把标准日志重定向到 %AppData%\feilian\feilian.log（追加，
+// 超 2MB 轮换一次；os.UserConfigDir 在 Windows 即 Roaming）。
+// GUI 形态没有控制台，引擎诊断（如无法解析报文的来源
 // 与 hex 样例）只有落盘才可远程取证。
 func (a *App) initLogging(ctx context.Context) context.Context {
 	dir, err := os.UserConfigDir()
