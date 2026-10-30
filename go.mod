@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/gen2brain/beeep v0.11.3
 	github.com/getlantern/systray v1.2.2
+	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/wailsapp/wails/v2 v2.17.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.61.0
@@ -17,6 +18,7 @@ require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/esiqveland/notify v0.13.3 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
+	github.com/gen2brain/shm v0.1.0 // indirect
 	github.com/getlantern/context v0.0.0-20190109183933-c447772a6520 // indirect
 	github.com/getlantern/errors v0.0.0-20190325191628-abdb3e3e36f7 // indirect
 	github.com/getlantern/golog v0.0.0-20190830074920-4ef2e798c2d7 // indirect
@@ -30,12 +32,14 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jackmordaunt/icns/v3 v3.0.1 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
+	github.com/jezek/xgb v1.1.1 // indirect
 	github.com/labstack/echo/v4 v4.15.3 // indirect
 	github.com/labstack/gommon v0.5.0 // indirect
 	github.com/leaanthony/go-ansi-parser v1.6.1 // indirect
 	github.com/leaanthony/gosod v1.0.4 // indirect
 	github.com/leaanthony/slicer v1.6.0 // indirect
 	github.com/leaanthony/u v1.1.1 // indirect
+	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect

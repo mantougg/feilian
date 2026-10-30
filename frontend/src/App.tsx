@@ -55,6 +55,8 @@ import {
   pickFolder,
   acceptFiles,
   getRecvDir,
+  captureScreen,
+  saveScreenshot,
   type EngineEvent,
   type FileEntryWire,
 } from './lib/wailsBridge';
@@ -82,6 +84,7 @@ export default function App() {
 
   // Modals state
   const [isScreenshotOpen, setIsScreenshotOpen] = useState(false);
+  const [shotUrl, setShotUrl] = useState<string>('');
   const [isRemoteAssistOpen, setIsRemoteAssistOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<'list' | 'chat'>('chat');
@@ -434,37 +437,29 @@ export default function App() {
     setOrder((prev) => bumpConversationOrder(prev, targetId));
   };
 
-  // Send image message
-  const handleSendImage = (imgCap: string) => {
+  // 发送截图（T-M4-1）：PNG 落盘（接收目录/screenshots）→ 文件通道发给对方 → 本地出图片卡片
+  const handleSendImage = async (pngData: string) => {
+    if (!pngData || !activeConvId) return;
     const targetId = activeConvId;
     const currentTime = formatCurrentTime();
-    const newMsgId = `img_${Date.now()}`;
 
-    setConversations((prev) => {
-      const currentList = prev[targetId] || [];
-      return {
-        ...prev,
-        [targetId]: [
-          ...currentList,
-          {
-            id: newMsgId,
-            t: 'img',
-            from: 'me',
-            imgCap,
-            time: currentTime,
-          },
-        ],
-      };
-    });
-
-    setOrder((prev) => bumpConversationOrder(prev, targetId));
-    setConversationMeta((prev) => ({
+    setConversations((prev) => ({
       ...prev,
-      [targetId]: {
-        time: currentTime,
-        unread: 0,
-      },
+      [targetId]: [
+        ...(prev[targetId] || []),
+        { id: `img_${Date.now()}`, t: 'img', from: 'me', imgCap: '屏幕截图', time: currentTime } as ChatMessage,
+      ],
     }));
+    setOrder((prev) => bumpConversationOrder(prev, targetId));
+
+    const contact = contacts[targetId];
+    if (contact?.isBroadcast) return;
+    try {
+      const p = await saveScreenshot(pngData);
+      await sendFiles(contact?.ip || targetId, '屏幕截图', [p]);
+    } catch {
+      // 落盘/发送失败：卡片保留，用户可重试
+    }
   };
 
   // Clear current conversation history
@@ -561,7 +556,10 @@ export default function App() {
                   onPickFolder={() => handlePickAndSendFiles('folder')}
                   onSendFile={() => handlePickAndSendFiles('file')} // 浏览器形态无路径，退化为选盘
                   onSendImage={handleSendImage}
-                  onOpenScreenshot={() => setIsScreenshotOpen(true)}
+                  onOpenScreenshot={() => {
+                    captureScreen().then(setShotUrl).catch(() => setShotUrl(''));
+                    setIsScreenshotOpen(true);
+                  }}
                   onOpenRemoteAssist={() => setIsRemoteAssistOpen(true)}
                   onOpenContactProfile={(cid) => {
                     setSelectedContactId(cid);
@@ -602,8 +600,9 @@ export default function App() {
       {/* Screen Capture Interactive Tool Modal */}
       <ScreenshotModal
         isOpen={isScreenshotOpen}
+        shotUrl={shotUrl}
         onClose={() => setIsScreenshotOpen(false)}
-        onCapture={(imgCap) => handleSendImage(imgCap)}
+        onCapture={(pngData) => handleSendImage(pngData)}
       />
 
       {/* Remote Assistance Simulation Modal */}

@@ -54,6 +54,8 @@ interface WailsHost {
         RejectFiles?: (reqId: string) => Promise<void>;
         OpenPath?: (path: string) => Promise<void>;
         GetRecvDir?: () => Promise<string>;
+        CaptureScreen?: () => Promise<string>;
+        SaveScreenshot?: (pngData: string) => Promise<string>;
       };
     };
   };
@@ -164,4 +166,14 @@ export async function openPath(path: string): Promise<void> {
 
 export async function getRecvDir(): Promise<string> {
   return (await host().go?.main?.App?.GetRecvDir?.()) ?? '';
+}
+
+/** 截取主屏 PNG data URL（浏览器形态返回空串）。 */
+export async function captureScreen(): Promise<string> {
+  return (await host().go?.main?.App?.CaptureScreen?.()) ?? '';
+}
+
+/** 裁剪产物落盘，返回路径。 */
+export async function saveScreenshot(pngData: string): Promise<string> {
+  return (await host().go?.main?.App?.SaveScreenshot?.(pngData)) ?? '';
 }
