@@ -56,6 +56,8 @@ interface WailsHost {
         GetRecvDir?: () => Promise<string>;
         CaptureScreen?: () => Promise<string>;
         SetLimitRate?: (label: string) => Promise<void>;
+        History?: (conv: string, before: string, limit: number) => Promise<HistoryMsg[]>;
+        SearchHistory?: (conv: string, keyword: string) => Promise<HistoryMsg[]>;
         SaveScreenshot?: (pngData: string) => Promise<string>;
       };
     };
@@ -182,4 +184,26 @@ export async function saveScreenshot(pngData: string): Promise<string> {
 /** 设置传输限速档位（不限速 | 512KB/s | 1MB/s）。 */
 export async function setLimitRate(label: string): Promise<void> {
   await host().go?.main?.App?.SetLimitRate?.(label);
+}
+
+/** 一条落库的聊天记录（store.Message 线格式）。 */
+export interface HistoryMsg {
+  id: number;
+  conv: string;
+  from: string;
+  isMine: boolean;
+  kind: string; // text | file
+  text: string;
+  msgRef: string;
+  sentAt: number; // unix 秒
+}
+
+/** 会话历史（SQLite 倒序翻页，时间升序返回）。 */
+export async function history(conv: string, before: string, limit: number): Promise<HistoryMsg[]> {
+  return (await host().go?.main?.App?.History?.(conv, before, limit)) ?? [];
+}
+
+/** 历史子串搜索。 */
+export async function searchHistory(conv: string, keyword: string): Promise<HistoryMsg[]> {
+  return (await host().go?.main?.App?.SearchHistory?.(conv, keyword)) ?? [];
 }

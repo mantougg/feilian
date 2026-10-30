@@ -23,6 +23,7 @@ import {
   CircleAlert,
 } from 'lucide-react';
 import { ChatMessage, Contact } from '../types';
+import { history, searchHistory, HistoryMsg } from '../lib/wailsBridge';
 import { STATUS_COLORS, STATUS_LABELS } from '../data/mockData';
 
 interface ChatPanelProps {
@@ -72,6 +73,19 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [historySearch, setHistorySearch] = useState('');
+  const [historyMsgs, setHistoryMsgs] = useState<HistoryMsg[]>([]);
+
+  // 聊天记录弹窗打开/搜索词变化时查 SQLite（T-M5-3；空关键词=最近 100 条）
+  useEffect(() => {
+    if (!showHistoryModal) return;
+    const kw = historySearch.trim();
+    const t = setTimeout(() => {
+      (kw ? searchHistory(activeConvId, kw) : history(activeConvId, '', 100))
+        .then(setHistoryMsgs)
+        .catch(() => setHistoryMsgs([]));
+    }, 200); // 防抖
+    return () => clearTimeout(t);
+  }, [showHistoryModal, historySearch, activeConvId]);
   const [folderNotification, setFolderNotification] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -664,15 +678,24 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {messages
-                .filter((m) => {
-                  if (m.t === 'chip' || m.t === 'typing') return false;
-                  if (!historySearch.trim()) return true;
-                  const query = historySearch.toLowerCase();
-                  if (m.text && m.text.toLowerCase().includes(query)) return true;
-                  if (m.fileName && m.fileName.toLowerCase().includes(query)) return true;
-                  return false;
-                })
+              {(historyMsgs.length > 0
+                ? historyMsgs.map((h): ChatMessage => ({
+                    id: `db_${h.id}`,
+                    t: (h.isMine ? 'me' : 'them') as ChatMessage['t'],
+                    text: h.text,
+                    time: new Date(h.sentAt * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+                    fileName: h.kind === 'file' ? h.text : undefined,
+                  }))
+                : messages
+                    .filter((m) => {
+                      if (m.t === 'chip' || m.t === 'typing') return false;
+                      if (!historySearch.trim()) return true;
+                      const query = historySearch.toLowerCase();
+                      if (m.text && m.text.toLowerCase().includes(query)) return true;
+                      if (m.fileName && m.fileName.toLowerCase().includes(query)) return true;
+                      return false;
+                    })
+              )
                 .map((m) => (
                   <div
                     key={m.id}
