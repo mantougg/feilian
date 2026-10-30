@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { MessageSquare } from 'lucide-react';
+import { MessageSquare, CircleAlert, X } from 'lucide-react';
 import { TitleBar } from './components/TitleBar';
 import { NavRail } from './components/NavRail';
 import { MiddleColumn } from './components/MiddleColumn';
@@ -90,6 +90,7 @@ export default function App() {
   const [isRemoteAssistOpen, setIsRemoteAssistOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<'list' | 'chat'>('chat');
+  const [engineError, setEngineError] = useState<string>('');
 
   // 挂载时拉取本机资料与当前在线用户快照（后续增量靠引擎事件，见 useEngineEvents）
   useEffect(() => {
@@ -254,7 +255,13 @@ export default function App() {
     };
   }, []);
 
+  // 引擎错误（启动失败/传输失败）：顶部横幅提示
+  const handleEngineError = (ev: EngineEvent) => {
+    if (ev.text) setEngineError(ev.text);
+  };
+
   useEngineEvents({
+    error: handleEngineError,
     peer_online: handlePeerPresence,
     peer_update: handlePeerPresence,
     peer_offline: handlePeerOffline,
@@ -516,6 +523,17 @@ export default function App() {
           isDesktop() ? '' : 'max-w-[1280px] max-h-[820px] rounded-2xl border border-[var(--line)] shadow-2xl'
         }`}
       >
+        {/* 引擎错误横幅：可关闭 */}
+        {engineError && (
+          <div className="flex items-center gap-2 px-4 py-1.5 bg-[var(--danger)]/10 border-b border-[var(--danger)]/30 text-[var(--danger)] text-xs" role="alert">
+            <CircleAlert className="w-3.5 h-3.5 flex-none" />
+            <span className="flex-1 truncate" title={engineError}>{engineError}</span>
+            <button type="button" onClick={() => setEngineError('')} className="p-0.5 hover:opacity-70 cursor-pointer flex-none" aria-label="关闭错误提示">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Custom Title Bar */}
         <TitleBar
           darkMode={settings.darkMode}

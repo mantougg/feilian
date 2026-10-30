@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gen2brain/beeep"
@@ -33,9 +35,10 @@ type SelfInfo struct {
 type App struct {
 	ctx         context.Context
 	engine      *engine.Engine
-	cfgData     config.Data  // 本地配置快照（T-M4-5 持久化）
-	recvDirPath string       // 接收目录（设置覆盖；空 = 默认下载目录）
-	db          *store.Store // 聊天记录（T-M4-6）；打开失败仅丢历史功能
+	events      chan engine.Event // 事件通道由 App 持有：引擎启动失败时也能向 UI 推错误
+	cfgData     config.Data       // 本地配置快照（T-M4-5 持久化）
+	recvDirPath string            // 接收目录（设置覆盖；空 = 默认下载目录）
+	db          *store.Store      // 聊天记录（T-M4-6）；打开失败仅丢历史功能
 }
 
 func NewApp() *App { return &App{} }
@@ -103,7 +106,7 @@ func (a *App) startEngine() {
 	if err != nil || hostname == "" {
 		hostname = "unknown-host"
 	}
-	events := make(chan engine.Event, 64)
+	a.events = make(chan engine.Event, 64)
 	cfg := engine.Config{
 		Hostname: hostname,
 		Status:   engine.StatusOnline,
@@ -119,19 +122,41 @@ func (a *App) startEngine() {
 	if cfg.Status != engine.StatusOnline && cfg.Status != engine.StatusBusy && cfg.Status != engine.StatusAway {
 		cfg.Status = engine.StatusOnline
 	}
-	a.engine = engine.New(cfg, events)
+	a.engine = engine.New(cfg, a.events)
 	a.applyLimitRate()
+	go a.pumpEvents() // 先起转发：Start 失败的错误事件也能到达前端
 	if err := a.engine.Start(); err != nil {
+		a.engine = nil
 		log.Printf("引擎启动失败: %v", err)
+		a.emitError("网络引擎启动失败：" + explainEngineError(err))
 		return
 	}
 	go a.pumpEvents()
 }
 
+// emitError 把错误作为引擎错误事件推给前端（引擎缺席时也走同一通道）。
+func (a *App) emitError(text string) {
+	defer func() { _ = recover() }() // 通道满/未初始化时不因错误报告而 panic
+	select {
+	case a.events <- engine.Event{Type: engine.EventEngineError, Text: text, Time: time.Now()}:
+	default:
+	}
+}
+
+// explainEngineError 把常见启动失败翻译成用户能行动的话。
+func explainEngineError(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "bind") {
+		return msg + " —— 端口被占用（本机可能已运行飞秋或另一实例飞联）。" +
+			"可用 netstat -ano | findstr 2425 查看占用进程。"
+	}
+	return msg
+}
+
 // pumpEvents 把引擎事件逐条转发为同名 Wails 事件，payload 为完整 Event 对象；
 // 引擎停止（通道关闭）后协程自然退出。
 func (a *App) pumpEvents() {
-	for ev := range a.engine.Events() {
+	for ev := range a.events {
 		a.recordEvent(ev)
 		runtime.EventsEmit(a.ctx, ev.Type, ev)
 	}
@@ -335,7 +360,7 @@ func (a *App) GetPeers() []engine.Peer {
 // SendText 向指定 IP 发送文本消息，返回报文 PacketNo 字符串（回执关联用）。
 func (a *App) SendText(ip, text string) (string, error) {
 	if a.engine == nil {
-		return "", engine.ErrNotStarted
+		return "", errors.New("引擎未启动（见启动时的错误提示，通常为 UDP 2425 端口被占用）")
 	}
 	return a.engine.SendText(ip, text)
 }
