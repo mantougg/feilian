@@ -238,6 +238,21 @@ export default function App() {
     });
   };
 
+  // 全局热键触发的截图（Go 侧 Ctrl+Alt+A → ui:screenshot 事件）
+  useEffect(() => {
+    const openShot = () => {
+      captureScreen().then(setShotUrl).catch(() => setShotUrl(''));
+      setIsScreenshotOpen(true);
+    };
+    window.addEventListener('ui:screenshot', openShot);
+    const off = (window as unknown as { runtime?: { EventsOn?: (n: string, cb: () => void) => void } })
+      .runtime?.EventsOn?.('ui:screenshot', openShot);
+    return () => {
+      window.removeEventListener('ui:screenshot', openShot);
+      off?.();
+    };
+  }, []);
+
   useEngineEvents({
     peer_online: handlePeerPresence,
     peer_update: handlePeerPresence,

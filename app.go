@@ -45,6 +45,13 @@ func (a *App) startup(ctx context.Context) {
 	a.loadConfig()
 	a.openStore()
 	a.startEngine()
+	a.registerHotkeys()
+}
+
+// triggerScreenshot 供热键与前端统一入口：拉底图并通知前端打开截图工具。
+func (a *App) triggerScreenshot() {
+	runtime.Show(a.ctx)
+	runtime.EventsEmit(a.ctx, "ui:screenshot")
 }
 
 // openStore 打开聊天记录库（与配置同目录）。

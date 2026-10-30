@@ -7,6 +7,7 @@ require (
 	github.com/getlantern/systray v1.2.2
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/wailsapp/wails/v2 v2.17.0
+	golang.design/x/hotkey v0.6.4
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.61.0
 )
@@ -57,6 +58,7 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
+	golang.design/x/mainthread v0.3.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
