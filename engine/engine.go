@@ -111,8 +111,9 @@ type Engine struct {
 	packetNo   atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
 	peers      map[string]Peer
 	peersMu    sync.RWMutex
-	queried    map[string]bool // 已单播查询过真昵称的飞秋占位 IP（去重）
+	queried    map[string]bool   // 已单播查询过真昵称的飞秋占位 IP（去重）
 	queryMu    sync.Mutex
+	feiqCmdSeen map[uint32]bool  // 已落过完整样例的飞秋命令码（每命令一份样本）
 	tserver    *transfer.Server
 	tlim       transfer.Limiter
 	xfersMu    sync.Mutex
@@ -133,7 +134,7 @@ func New(cfg Config, events chan Event) *Engine {
 	if cfg.Status == "" {
 		cfg.Status = StatusOnline
 	}
-	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), queried: make(map[string]bool), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest)}
+	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), queried: make(map[string]bool), feiqCmdSeen: make(map[uint32]bool), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest)}
 	return e
 }
 
@@ -435,15 +436,35 @@ func (e *Engine) handleFeiqNative(fq FeiqNative, raw string, from *net.UDPAddr) 
 	e.peers[key] = p
 	e.peersMu.Unlock()
 	if !existed {
-		// 首包完整落日志（诊断样例仅 64B，逆向私有格式需完整布局）
-		sample := raw
-		if len(sample) > 256 {
-			sample = sample[:256]
-		}
-		log.Printf("飞秋首包 from %s (%d B): %x", from, len(raw), sample)
 		e.emit(Event{Type: EventPeerOnline, Peer: p, Time: time.Now()})
 		go e.queryRealNick(from) // 占位昵称是登录名，主动查真昵称
 	}
+	// 每种飞秋命令码落一份完整样例（诊断样例截断 64B，完整布局是逆向
+	// 私有格式、定位真昵称字段的依据；首包心跳/查询应答都经此留痕）
+	e.queryMu.Lock()
+	seen := e.feiqCmdSeen[fq.Command]
+	e.feiqCmdSeen[fq.Command] = true
+	e.queryMu.Unlock()
+	if !seen {
+		e.pushSample(fmt.Sprintf("飞秋cmd=%d %s", fq.Command, from), raw)
+	}
+}
+
+// pushSample 把一条诊断样例（完整报文 hex，截 200B）放入环形缓冲，
+// 供空态诊断区展示与「复制诊断」带走；与解析失败样例共用存储。
+func (e *Engine) pushSample(from string, raw string) {
+	const max = 200
+	if len(raw) > max {
+		raw = raw[:max]
+	}
+	s := unparsedSample{Time: time.Now(), From: from, Hex: fmt.Sprintf("%x", raw)}
+	log.Printf("诊断样例 %s (%d B): %s", from, len(raw), s.Hex)
+	e.rawMu.Lock()
+	e.samples = append(e.samples, s)
+	if len(e.samples) > 8 {
+		e.samples = e.samples[len(e.samples)-8:]
+	}
+	e.rawMu.Unlock()
 }
 
 // queryRealNick 向飞秋占位联系人单播一条标准 IPMsg BrEntry（每 IP 一次）：
@@ -461,23 +482,11 @@ func (e *Engine) queryRealNick(from *net.UDPAddr) {
 	_, _ = e.sendPacket(CmdBrEntry, e.presenceJSON(), from)
 }
 
-// noteUnparsed 记录解析失败报文：计数 + 环形缓冲最近 8 条（时间/源地址/
-// 前 64 字节 hex）+ 日志，供 UI 空态与远程排查判断流量来自异构客户端
-// （飞秋/飞鸽）还是网络里的其他广播源（如云桌面底层）。
+// noteUnparsed 记录解析失败报文：计数 + 完整 hex 样例入环形缓冲 + 日志，
+// 供 UI 空态与远程排查判断流量来源（异构客户端/网络其他广播源）。
 func (e *Engine) noteUnparsed(raw []byte, from *net.UDPAddr) {
 	e.rxUnparsed.Add(1)
-	const max = 64
-	if len(raw) > max {
-		raw = raw[:max]
-	}
-	s := unparsedSample{Time: time.Now(), From: from.String(), Hex: fmt.Sprintf("%x", raw)}
-	log.Printf("无法解析的报文 from %s (%d B): %s", s.From, len(raw), s.Hex)
-	e.rawMu.Lock()
-	e.samples = append(e.samples, s)
-	if len(e.samples) > 8 {
-		e.samples = e.samples[len(e.samples)-8:]
-	}
-	e.rawMu.Unlock()
+	e.pushSample(from.String(), string(raw))
 }
 
 // UnparsedSamples 返回最近解析失败报文的诊断行（UI 展示/复制用）。
