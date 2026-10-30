@@ -3,6 +3,24 @@
  * 在浏览器直接 `npm run dev` 预览时 window.go 不存在，全部优雅降级为空操作，
  * 界面保留浏览器演示形态（带假窗口边框）；在 Wails 桌面运行时走真实窗口控制。
  */
+
+/** 引擎事件（engine.Event 经 Wails EventsEmit 的 payload，小写 tag）。 */
+export interface EngineEvent {
+  type: string;
+  peer: {
+    nick: string;
+    host: string;
+    ip: string;
+    port: number;
+    dept: string;
+    status: string; // online | busy | away | offline
+    lastSeen?: string;
+  };
+  msgId: string;
+  text: string;
+  time: string;
+}
+
 interface WailsHost {
   go?: {
     main?: {
@@ -10,8 +28,16 @@ interface WailsHost {
         Minimize?: () => void;
         ToggleMaximize?: () => void;
         CloseWindow?: () => void;
+        GetPeers?: () => Promise<EngineEvent['peer'][]>;
+        SendText?: (ip: string, text: string) => Promise<void>;
+        BroadcastText?: (text: string) => Promise<void>;
+        GetSelf?: () => Promise<SelfInfo>;
+        SetSelf?: (nick: string, dept: string, status: string) => Promise<void>;
       };
     };
+  };
+  runtime?: {
+    EventsOn?: (name: string, callback: (data: EngineEvent) => void) => () => void;
   };
 }
 
@@ -33,4 +59,50 @@ export function toggleMaximizeWindow(): void {
 
 export function closeWindow(): void {
   host().go?.main?.App?.CloseWindow?.();
+}
+
+// ---- 引擎桥接（T-M2 起）：浏览器形态一律降级为空数据 ----
+
+export async function getPeers(): Promise<EngineEvent['peer'][]> {
+  return (await host().go?.main?.App?.GetPeers?.()) ?? [];
+}
+
+export interface SelfInfo {
+  nick: string;
+  hostname: string;
+  ip: string;
+  dept: string;
+  status: string;
+}
+
+export async function getSelf(): Promise<SelfInfo> {
+  return (
+    (await host().go?.main?.App?.GetSelf?.()) ?? {
+      nick: '浏览器预览',
+      hostname: 'browser',
+      ip: '127.0.0.1',
+      dept: '未分组',
+      status: 'online',
+    }
+  );
+}
+
+export async function setSelf(nick: string, dept: string, status: string): Promise<void> {
+  await host().go?.main?.App?.SetSelf?.(nick, dept, status);
+}
+
+/** 返回报文序号（回执关联用）；浏览器形态返回空串。 */
+export async function sendText(ip: string, text: string): Promise<string> {
+  await host().go?.main?.App?.SendText?.(ip, text);
+  return '';
+}
+
+export async function broadcastText(text: string): Promise<void> {
+  await host().go?.main?.App?.BroadcastText?.(text);
+}
+
+/** 订阅引擎事件（Wails EventsOn 透传）；浏览器形态立即返回取消空函数。 */
+export function onEngineEvent(name: string, cb: (ev: EngineEvent) => void): () => void {
+  const off = host().runtime?.EventsOn?.(name, cb);
+  return off ?? (() => undefined);
 }

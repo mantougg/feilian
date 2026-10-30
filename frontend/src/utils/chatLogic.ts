@@ -1,4 +1,55 @@
 import { ChatMessage, Contact, ConversationMeta } from '../types';
+import { avatarColor } from '../data/mockData';
+
+/** 引擎 peer 的最小字段（wailsBridge.EngineEvent['peer'] 同构）。 */
+export interface PeerLike {
+  nick: string;
+  host: string;
+  ip: string;
+  port: number;
+  dept: string;
+  status: string;
+}
+
+/** 联系人 id = 引擎用户表主键 nick@host。 */
+export function peerId(peer: PeerLike): string {
+  return `${peer.nick}@${peer.host}`;
+}
+
+/** 引擎状态 → UI UserStatus（away 归入 busy：均为不可打扰态）。 */
+export function peerStatusToUi(status: string): Contact['status'] {
+  if (status === 'online') return 'ok';
+  if (status === 'busy' || status === 'away') return 'busy';
+  return 'off';
+}
+
+/** 引擎 peer → UI Contact（昵称首字符作头像字，颜色由昵称稳定生成）。 */
+export function peerToContact(peer: PeerLike): Contact {
+  return {
+    id: peerId(peer),
+    char: peer.nick.slice(0, 1) || '?',
+    color: avatarColor(peer.nick + '@' + peer.host),
+    name: peer.nick,
+    host: peer.host,
+    ip: peer.ip,
+    dept: peer.dept || '未分组',
+    status: peerStatusToUi(peer.status),
+  };
+}
+
+/** 联系人按部门分组（self 并入自身部门；广播/群聊通道除外），部门名稳定排序。 */
+export function groupContactsByDept(contacts: Record<string, Contact>): Array<{ dept: string; members: Contact[] }> {
+  const groups = new Map<string, Contact[]>();
+  for (const c of Object.values(contacts)) {
+    if (c.isBroadcast || c.isGroup) continue;
+    const dept = c.dept || '未分组';
+    if (!groups.has(dept)) groups.set(dept, []);
+    groups.get(dept)!.push(c);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'zh-Hans-CN'))
+    .map(([dept, members]) => ({ dept, members }));
+}
 
 /**
  * Bump active conversation ID to the beginning of the list without duplicates.

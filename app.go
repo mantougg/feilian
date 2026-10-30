@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 
 	"feilian/engine"
@@ -14,6 +15,7 @@ import (
 type SelfInfo struct {
 	Nick     string `json:"nick"`
 	Hostname string `json:"hostname"`
+	IP       string `json:"ip"`
 	Dept     string `json:"dept"`
 	Status   string `json:"status"`
 }
@@ -97,13 +99,39 @@ func (a *App) SendText(ip, text string) error {
 	return a.engine.SendText(ip, text)
 }
 
-// GetSelf 我的资料。
+// BroadcastText 向全网段广播文本消息。
+func (a *App) BroadcastText(text string) error {
+	if a.engine == nil {
+		return engine.ErrNotStarted
+	}
+	return a.engine.BroadcastText(text)
+}
+
+// GetSelf 我的资料（IP 取首个非回环 IPv4，展示用）。
 func (a *App) GetSelf() SelfInfo {
 	if a.engine == nil {
 		return SelfInfo{}
 	}
 	cfg := a.engine.Self()
-	return SelfInfo{Nick: cfg.Nick, Hostname: cfg.Hostname, Dept: cfg.Dept, Status: cfg.Status}
+	return SelfInfo{Nick: cfg.Nick, Hostname: cfg.Hostname, IP: localIP(), Dept: cfg.Dept, Status: cfg.Status}
+}
+
+// localIP 取本机首个非回环 IPv4 地址（多网卡时为主要网卡，展示足够）。
+func localIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if ip := ipnet.IP.To4(); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 // SetSelf 修改我的资料并全网广播（引擎侧留空字段保持不变）。

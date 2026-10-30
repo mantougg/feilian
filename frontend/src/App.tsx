@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { MessageSquare } from 'lucide-react';
 import { TitleBar } from './components/TitleBar';
 import { NavRail } from './components/NavRail';
 import { MiddleColumn } from './components/MiddleColumn';
@@ -24,40 +25,44 @@ import {
 } from './types';
 
 import {
-  INITIAL_CONTACTS,
-  INITIAL_CONVERSATIONS,
-  INITIAL_CONVERSATION_META,
-  INITIAL_ORDER,
   INITIAL_SETTINGS,
   INITIAL_SELF,
-  AUTOMATIC_REPLIES,
+  BROADCAST_CONTACT,
 } from './data/mockData';
 
 import {
   bumpConversationOrder,
   calculateTotalUnread,
   formatCurrentTime,
+  peerToContact,
+  peerStatusToUi,
 } from './utils/chatLogic';
-import { isDesktop, minimizeWindow, toggleMaximizeWindow, closeWindow } from './lib/wailsBridge';
+import {
+  isDesktop,
+  minimizeWindow,
+  toggleMaximizeWindow,
+  closeWindow,
+  getPeers,
+  getSelf,
+} from './lib/wailsBridge';
 
 export default function App() {
   // Application view state
   const [activeView, setActiveView] = useState<ActiveView>('chats');
   const [activeSettingsPage, setActiveSettingsPage] = useState<SettingsPage>('general');
-  const [activeConvId, setActiveConvId] = useState<string>('zhang');
-  const [selectedContactId, setSelectedContactId] = useState<string>('zhang');
+  const [activeConvId, setActiveConvId] = useState<string>('');
+  const [selectedContactId, setSelectedContactId] = useState<string>('bc');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  // Data states
+  // Data states（M2：mock 退场，self 占位由 GetSelf 覆盖，联系人由引擎事件构建）
   const [selfUser, setSelfUser] = useState<Contact>(INITIAL_SELF);
-  const [contacts, setContacts] = useState<Record<string, Contact>>(INITIAL_CONTACTS);
-  const [conversations, setConversations] = useState<Record<string, ChatMessage[]>>(
-    INITIAL_CONVERSATIONS
-  );
-  const [conversationMeta, setConversationMeta] = useState<Record<string, ConversationMeta>>(
-    INITIAL_CONVERSATION_META
-  );
-  const [order, setOrder] = useState<string[]>(INITIAL_ORDER);
+  const [contacts, setContacts] = useState<Record<string, Contact>>({
+    self: INITIAL_SELF,
+    bc: BROADCAST_CONTACT,
+  });
+  const [conversations, setConversations] = useState<Record<string, ChatMessage[]>>({});
+  const [conversationMeta, setConversationMeta] = useState<Record<string, ConversationMeta>>({});
+  const [order, setOrder] = useState<string[]>(['bc']);
   const [settings, setSettings] = useState<AppSettings>(INITIAL_SETTINGS);
 
   // Modals state
@@ -65,6 +70,30 @@ export default function App() {
   const [isRemoteAssistOpen, setIsRemoteAssistOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<'list' | 'chat'>('chat');
+
+  // 挂载时拉取本机资料与当前在线用户快照（后续增量靠引擎事件，见 useEngineEvents）
+  useEffect(() => {
+    (async () => {
+      const s = await getSelf();
+      setSelfUser((prev) => ({
+        ...prev,
+        name: s.nick,
+        char: s.nick.slice(0, 1) || '我',
+        host: s.hostname,
+        ip: s.ip,
+        dept: s.dept || '未分组',
+        status: peerStatusToUi(s.status),
+      }));
+      const peers = await getPeers();
+      if (peers.length > 0) {
+        setContacts((prev) => {
+          const next = { ...prev };
+          for (const p of peers) next[p.nick + '@' + p.host] = peerToContact(p);
+          return next;
+        });
+      }
+    })();
+  }, []);
 
   // Apply dark mode to document element
   useEffect(() => {
@@ -140,7 +169,7 @@ export default function App() {
     setMobilePane('chat');
   };
 
-  // Send message
+  // Send message（发送链路 T-M2-4 接引擎；此处先本地呈现）
   const handleSendMessage = (text: string) => {
     const targetId = activeConvId;
     const currentTime = formatCurrentTime();
@@ -172,44 +201,6 @@ export default function App() {
         unread: 0,
       },
     }));
-
-    // Realistic auto-reply simulation
-    setTimeout(() => {
-      const replyPool = AUTOMATIC_REPLIES[targetId] || AUTOMATIC_REPLIES.zhang;
-      const randomReply = replyPool[Math.floor(Math.random() * replyPool.length)];
-      const who = targetId === 'group' ? 'zhang' : targetId;
-      const replySender = contacts[who] || contacts.zhang;
-      const replyTime = formatCurrentTime();
-      const replyMsgId = `r_${Date.now()}`;
-
-      setConversations((prev) => {
-        const list = prev[targetId] || [];
-        return {
-          ...prev,
-          [targetId]: [
-            ...list,
-            {
-              id: replyMsgId,
-              t: 'them',
-              who,
-              name: `${replySender.name} · ${replyTime}`,
-              text: randomReply,
-              time: replyTime,
-            },
-          ],
-        };
-      });
-
-      // Update meta and bump
-      setOrder((prev) => bumpConversationOrder(prev, targetId));
-      setConversationMeta((prev) => ({
-        ...prev,
-        [targetId]: {
-          time: replyTime,
-          unread: activeConvId === targetId ? 0 : (prev[targetId]?.unread || 0) + 1,
-        },
-      }));
-    }, 1100);
   };
 
   // Send file card
@@ -304,8 +295,8 @@ export default function App() {
     }));
   };
 
-  const activeContact = contacts[activeConvId] || contacts.zhang;
-  const currentContactDetail = contacts[selectedContactId] || contacts.zhang;
+  const activeContact = activeConvId ? contacts[activeConvId] : undefined;
+  const currentContactDetail = contacts[selectedContactId] || BROADCAST_CONTACT;
 
   return (
     <div
@@ -360,36 +351,37 @@ export default function App() {
 
           {/* Column 3: Main Area (Dynamic based on activeView) */}
           <main className="flex-1 flex min-w-0 h-full overflow-hidden" role="main">
-            {activeView === 'chats' && (
-              <ChatPanel
-                activeConvId={activeConvId}
-                contact={activeContact}
-                messages={conversations[activeConvId] || []}
-                onSendMessage={handleSendMessage}
-                onSendFile={handleSendFile}
-                onSendImage={handleSendImage}
-                onOpenScreenshot={() => setIsScreenshotOpen(true)}
-                onOpenRemoteAssist={() => setIsRemoteAssistOpen(true)}
-                onOpenContactProfile={(cid) => {
-                  setSelectedContactId(cid);
-                  setActiveView('contacts');
-                }}
-                onClearHistory={handleClearHistory}
-                selfUser={selfUser}
-                onBack={() => setMobilePane('list')}
-              />
-            )}
+            {activeView === 'chats' &&
+              (activeContact ? (
+                <ChatPanel
+                  activeConvId={activeConvId}
+                  contact={activeContact}
+                  messages={conversations[activeConvId] || []}
+                  onSendMessage={handleSendMessage}
+                  onSendFile={handleSendFile}
+                  onSendImage={handleSendImage}
+                  onOpenScreenshot={() => setIsScreenshotOpen(true)}
+                  onOpenRemoteAssist={() => setIsRemoteAssistOpen(true)}
+                  onOpenContactProfile={(cid) => {
+                    setSelectedContactId(cid);
+                    setActiveView('contacts');
+                  }}
+                  onClearHistory={handleClearHistory}
+                  selfUser={selfUser}
+                  onBack={() => setMobilePane('list')}
+                />
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-[var(--mut)] select-none">
+                  <MessageSquare className="w-10 h-10 mb-3 opacity-40" />
+                  <p className="text-sm">从左侧选择一个会话开始聊天</p>
+                </div>
+              ))}
 
             {activeView === 'contacts' && (
               <ContactDetailPanel
                 contact={currentContactDetail}
                 onStartChat={(cid) => handleOpenContactChat(cid)}
-                onSendFile={() => {
-                  handleOpenContactChat(selectedContactId);
-                  setTimeout(() => {
-                    handleSendFile('资料清单.pdf', '2.4 MB');
-                  }, 300);
-                }}
+                onSendFile={() => handleOpenContactChat(selectedContactId)}
                 onRemoteAssist={() => setIsRemoteAssistOpen(true)}
               />
             )}
@@ -417,7 +409,7 @@ export default function App() {
       <RemoteAssistModal
         isOpen={isRemoteAssistOpen}
         onClose={() => setIsRemoteAssistOpen(false)}
-        contact={activeView === 'contacts' ? currentContactDetail : activeContact}
+        contact={activeView === 'contacts' ? currentContactDetail : activeContact ?? currentContactDetail}
       />
 
       {/* User Profile / Status Broadcast Modal */}

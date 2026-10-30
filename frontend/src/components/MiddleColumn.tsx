@@ -17,7 +17,7 @@ import {
   ChatMessage,
 } from '../types';
 import { STATUS_COLORS, STATUS_LABELS } from '../data/mockData';
-import { getConversationPreview } from '../utils/chatLogic';
+import { getConversationPreview, groupContactsByDept } from '../utils/chatLogic';
 
 interface MiddleColumnProps {
   activeView: ActiveView;
@@ -206,11 +206,11 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
       {activeView === 'contacts' && (
         <div className="flex-1 min-h-0 flex flex-col">
           <div className="flex-1 overflow-y-auto px-1.5 pt-1 pb-2 space-y-0.5">
-            {/* Section: Groups & Broadcast */}
+            {/* Section: Broadcast */}
             <div className="text-[11px] text-[var(--mut)] px-2.5 pt-2 pb-1 font-medium">
               群聊与广播
             </div>
-            {['group', 'bc'].map((id) => {
+            {['bc'].map((id) => {
               const c = contacts[id];
               if (!c) return null;
               if (
@@ -237,146 +237,84 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                     className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-white flex-none"
                     style={{ backgroundColor: c.color }}
                   >
-                    {c.isGroup ? <Users className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
+                    <Radio className="w-4 h-4" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-[13px] font-normal truncate text-[var(--text)]">
                       {c.name}
                     </div>
                     <div className="text-[11px] text-[var(--mut)] truncate flex items-center gap-1 mt-0.5">
-                      {c.isGroup ? '12 人 · 局域网群聊' : '192.168.1.255 · 全员'}
+                      {c.ip} · 全员
                     </div>
                   </div>
                 </button>
               );
             })}
 
-            {/* Section: R&D Dept */}
-            <div className="text-[11px] text-[var(--mut)] px-2.5 pt-3 pb-1 font-medium">
-              研发中心 · 3
-            </div>
-            {['zhang', 'wang'].map((id) => {
-              const c = contacts[id];
-              if (!c) return null;
-              if (
-                searchQuery &&
-                !c.name.includes(searchQuery) &&
-                !c.dept.includes(searchQuery) &&
-                !c.ip.includes(searchQuery)
-              ) {
-                return null;
-              }
-              const isSelected = selectedContactId === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => onSelectContact(id)}
-                  onDoubleClick={() => onOpenContactChat(id)}
-                  className={`w-full flex items-center gap-2.5 py-1.5 px-2 rounded-lg text-left transition-colors cursor-pointer ${
-                    isSelected ? 'bg-[var(--accsoft)]' : 'hover:bg-[var(--panel2)]'
-                  }`}
-                  aria-label={`${c.name} 资料`}
-                >
-                  <div
-                    className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-white text-xs font-semibold relative flex-none"
-                    style={{ backgroundColor: c.color }}
-                  >
-                    {c.char}
-                    {renderStatusDot(c.status)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[13px] font-normal truncate text-[var(--text)]">
-                      {c.name}
-                    </div>
-                    <div className="text-[11px] text-[var(--mut)] truncate flex items-center gap-1 mt-0.5">
-                      {renderInlineDot(c.status)}
-                      <span className="tabular-nums">{c.ip}</span>
-                      <span>·</span>
-                      <span>{STATUS_LABELS[c.status]}</span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
+            {/* Sections: peers grouped by dept（引擎数据驱动） */}
+            {groupContactsByDept(contacts).map(({ dept, members }) => (
+              <div key={dept}>
+                <div className="text-[11px] text-[var(--mut)] px-2.5 pt-3 pb-1 font-medium">
+                  {dept} · {members.length}
+                </div>
+                {members.map((c) => {
+                  if (
+                    searchQuery &&
+                    !c.name.includes(searchQuery) &&
+                    !c.dept.includes(searchQuery) &&
+                    !c.ip.includes(searchQuery) &&
+                    !c.host.toLowerCase().includes(searchQuery.toLowerCase())
+                  ) {
+                    return null;
+                  }
+                  const isSelected = selectedContactId === c.id;
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => onSelectContact(c.id)}
+                      onDoubleClick={() => onOpenContactChat(c.id)}
+                      className={`w-full flex items-center gap-2.5 py-1.5 px-2 rounded-lg text-left transition-colors cursor-pointer ${
+                        isSelected ? 'bg-[var(--accsoft)]' : 'hover:bg-[var(--panel2)]'
+                      }`}
+                      aria-label={`${c.name} 资料`}
+                    >
+                      <div
+                        className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-white text-xs font-semibold relative flex-none"
+                        style={{ backgroundColor: c.color }}
+                      >
+                        {c.isSelf ? c.char : c.char}
+                        {renderStatusDot(c.isSelf ? selfUser.status : c.status)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] font-normal truncate text-[var(--text)]">
+                          {c.name}
+                          {c.isSelf ? '（我）' : ''}
+                        </div>
+                        <div className="text-[11px] text-[var(--mut)] truncate flex items-center gap-1 mt-0.5">
+                          {renderInlineDot(c.isSelf ? selfUser.status : c.status)}
+                          <span className="tabular-nums">{c.ip}</span>
+                          <span>·</span>
+                          <span>{c.isSelf ? '本机' : STATUS_LABELS[c.isSelf ? selfUser.status : c.status]}</span>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
 
-            {/* Self entry in R&D */}
-            {(!searchQuery ||
-              selfUser.name.includes(searchQuery) ||
-              selfUser.ip.includes(searchQuery)) && (
-              <div
-                className="w-full flex items-center gap-2.5 py-1.5 px-2 rounded-lg text-left opacity-90 cursor-default"
-                aria-label="周舟（我）"
-              >
-                <div
-                  className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-white text-xs font-semibold relative flex-none"
-                  style={{ backgroundColor: selfUser.color }}
-                >
-                  {selfUser.char}
-                  {renderStatusDot(selfUser.status)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[13px] font-normal truncate text-[var(--text)]">
-                    {selfUser.name}（我）
-                  </div>
-                  <div className="text-[11px] text-[var(--mut)] truncate flex items-center gap-1 mt-0.5">
-                    {renderInlineDot(selfUser.status)}
-                    <span className="tabular-nums">{selfUser.ip}</span>
-                    <span>·</span>
-                    <span>本机</span>
-                  </div>
-                </div>
+            {/* Empty state：局域网暂无其他在线用户 */}
+            {groupContactsByDept(contacts).every(({ members }) => members.every((m) => m.isSelf)) && (
+              <div className="mx-2.5 mt-4 p-4 rounded-xl bg-[var(--panel2)] text-center">
+                <Users className="w-6 h-6 mx-auto mb-2 text-[var(--mut)] opacity-60" />
+                <p className="text-xs text-[var(--mut)] leading-relaxed">
+                  正在探测局域网在线同事…
+                  <br />
+                  确认其他设备已运行飞联并放行 UDP 2425
+                </p>
               </div>
             )}
-
-            {/* Section: Product Dept */}
-            <div className="text-[11px] text-[var(--mut)] px-2.5 pt-3 pb-1 font-medium">
-              产品部 · 2
-            </div>
-            {['li', 'chen'].map((id) => {
-              const c = contacts[id];
-              if (!c) return null;
-              if (
-                searchQuery &&
-                !c.name.includes(searchQuery) &&
-                !c.dept.includes(searchQuery) &&
-                !c.ip.includes(searchQuery)
-              ) {
-                return null;
-              }
-              const isSelected = selectedContactId === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => onSelectContact(id)}
-                  onDoubleClick={() => onOpenContactChat(id)}
-                  className={`w-full flex items-center gap-2.5 py-1.5 px-2 rounded-lg text-left transition-colors cursor-pointer ${
-                    isSelected ? 'bg-[var(--accsoft)]' : 'hover:bg-[var(--panel2)]'
-                  }`}
-                  aria-label={`${c.name} 资料`}
-                >
-                  <div
-                    className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-white text-xs font-semibold relative flex-none"
-                    style={{ backgroundColor: c.color }}
-                  >
-                    {c.char}
-                    {renderStatusDot(c.status)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[13px] font-normal truncate text-[var(--text)]">
-                      {c.name}
-                    </div>
-                    <div className="text-[11px] text-[var(--mut)] truncate flex items-center gap-1 mt-0.5">
-                      {renderInlineDot(c.status)}
-                      <span className="tabular-nums">{c.ip}</span>
-                      <span>·</span>
-                      <span>{STATUS_LABELS[c.status]}</span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
           </div>
           <div className="text-[11px] text-[var(--mut)] text-center py-2 px-2.5 border-t border-[var(--line)] flex-none">
             单击查看资料 · 双击直接进入会话

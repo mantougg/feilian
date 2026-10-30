@@ -37,22 +37,22 @@ const (
 
 // Peer 描述局域网内的一个其他用户。
 type Peer struct {
-	Nick     string    // 昵称
-	Host     string    // 主机名
-	IP       string    // 来源地址（形如 192.168.1.23）
-	Port     int       // 对方实际监听端口（标准部署恒 2425；同机联调双开端口不同）
-	Dept     string    // 部门/分组（飞联扩展字段）
-	Status   string    // online | busy | away | offline
-	LastSeen time.Time // 最后一次收到报文的时间
+	Nick     string    `json:"nick"`     // 昵称
+	Host     string    `json:"host"`     // 主机名
+	IP       string    `json:"ip"`       // 来源地址（形如 192.168.1.23）
+	Port     int       `json:"port"`     // 对方实际监听端口（标准部署恒 2425；同机联调双开端口不同）
+	Dept     string    `json:"dept"`     // 部门/分组（飞联扩展字段）
+	Status   string    `json:"status"`   // online | busy | away | offline
+	LastSeen time.Time `json:"lastSeen"` // 最后一次收到报文的时间
 }
 
 // Event 是引擎推给 UI 的事件。字段按 Type 取用，其余为零值。
 type Event struct {
-	Type  string
-	Peer  Peer
-	MsgID string // 我方报文 PacketNo 的字符串形式（回执匹配用）
-	Text  string // 文本内容 / 错误信息
-	Time  time.Time
+	Type  string    `json:"type"`
+	Peer  Peer      `json:"peer"`
+	MsgID string    `json:"msgId"` // 我方报文 PacketNo 的字符串形式（回执匹配用）
+	Text  string    `json:"text"`  // 文本内容 / 错误信息
+	Time  time.Time `json:"time"`
 }
 
 // Config 引擎配置（M1 由 app.go 从本地配置读取，M4-T 持久化）。

@@ -5,6 +5,10 @@ import {
   calculateTotalUnread,
   getConversationPreview,
   filterContacts,
+  peerId,
+  peerStatusToUi,
+  peerToContact,
+  groupContactsByDept,
 } from './chatLogic';
 import { ChatMessage, Contact } from '../types';
 
@@ -81,4 +85,45 @@ test('filterContacts matches name, IP, dept, and hostname', () => {
   assert.equal(filterContacts(contacts, 'PC-WANG').length, 1);
   assert.equal(filterContacts(contacts, '不存在').length, 0);
   assert.equal(filterContacts(contacts, '').length, 3);
+});
+
+// ---- M2：引擎 peer → 联系人派生 ----
+
+test('peerId 拼接 nick@host 主键', () => {
+  assert.equal(peerId({ nick: '张伟', host: 'PC-A', ip: '', port: 2425, dept: '', status: '' }), '张伟@PC-A');
+});
+
+test('peerStatusToUi 映射：online→ok，busy/away→busy，其余→off', () => {
+  assert.equal(peerStatusToUi('online'), 'ok');
+  assert.equal(peerStatusToUi('busy'), 'busy');
+  assert.equal(peerStatusToUi('away'), 'busy');
+  assert.equal(peerStatusToUi('offline'), 'off');
+  assert.equal(peerStatusToUi(''), 'off');
+});
+
+test('peerToContact 生成完整 Contact（首字符头像/稳定底色/部门兜底）', () => {
+  const c = peerToContact({ nick: '张伟', host: 'PC-ZHANG', ip: '192.168.1.23', port: 2425, dept: '', status: 'online' });
+  assert.equal(c.id, '张伟@PC-ZHANG');
+  assert.equal(c.name, '张伟');
+  assert.equal(c.char, '张');
+  assert.equal(c.dept, '未分组');
+  assert.equal(c.status, 'ok');
+  // 同一昵称+主机多次派生颜色稳定
+  const c2 = peerToContact({ nick: '张伟', host: 'PC-ZHANG', ip: 'x', port: 1, dept: '', status: '' });
+  assert.equal(c.color, c2.color);
+});
+
+test('groupContactsByDept 按部门分组并排除广播/群聊', () => {
+  const contacts: Record<string, Contact> = {
+    bc: { id: 'bc', char: '播', name: '广播', color: '#000', ip: '', dept: '全员', status: 'bc', host: '' , isBroadcast: true },
+    a: { id: 'a', char: '张', name: '张伟', color: '#000', ip: '', dept: '研发中心', status: 'ok', host: '' },
+    b: { id: 'b', char: '王', name: '王强', color: '#000', ip: '', dept: '研发中心', status: 'busy', host: '' },
+    c: { id: 'c', char: '李', name: '李婷', color: '#000', ip: '', dept: '产品部', status: 'ok', host: '' },
+    d: { id: 'd', char: '陈', name: '陈晨', color: '#000', ip: '', dept: '', status: 'off', host: '' },
+  };
+  const groups = groupContactsByDept(contacts);
+  assert.deepEqual(groups.map((g) => g.dept), ['产品部', '未分组', '研发中心']); // zh-Hans-CN 排序
+  assert.equal(groups.find((g) => g.dept === '研发中心')!.members.length, 2);
+  assert.equal(groups.find((g) => g.dept === '未分组')!.members[0].name, '陈晨');
+  assert.ok(!groups.some((g) => g.dept === '全员'));
 });

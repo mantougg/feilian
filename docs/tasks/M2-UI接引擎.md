@@ -6,13 +6,13 @@
 > **前置**：M1 完成（至少 T-M1-5 事件桥）。
 > **UI 基准**：根目录《[DESIGN.md](../../DESIGN.md)》。
 
-## T-M2-1 数据层替换 ⬜ <a id="T-M2-1"></a>
+## T-M2-1 数据层替换 ✅ <a id="T-M2-1"></a>
 
-- [ ] `frontend/src/data/mockData.ts` 退化为「我自己」的初始值
-- [ ] contacts / conversations 由引擎事件驱动构建
-- [ ] 空网络时显示空态
+- [x] `frontend/src/data/mockData.ts` 退化为「我自己」的初始值
+- [x] contacts / conversations 由引擎事件驱动构建
+- [x] 空网络时显示空态
 
-**验收**：UI 无 mock 依赖。
+**验收**：UI 无 mock 依赖。✅（mock 只剩 self 占位 + 广播常量 + 状态色表；联系人 id = 引擎主键 `nick@host`；挂载时 GetPeers/GetSelf 拉快照，增量靠事件（T-M2-2）；联系人视图改按部门动态分组（chatLogic.groupContactsByDept 带单测）；无在线用户显示空态。顺带完成 T-M2-3 的「删除自动回复模拟」——AUTOMATIC_REPLIES 与 mock 会话一并退场）
 **依赖**：T-M1-5。
 
 ## T-M2-2 事件订阅 ⬜ <a id="T-M2-2"></a>
