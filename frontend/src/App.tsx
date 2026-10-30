@@ -57,6 +57,7 @@ import {
   getRecvDir,
   captureScreen,
   saveScreenshot,
+  onEngineEvent,
   type EngineEvent,
   type FileEntryWire,
 } from './lib/wailsBridge';
@@ -245,11 +246,10 @@ export default function App() {
       setIsScreenshotOpen(true);
     };
     window.addEventListener('ui:screenshot', openShot);
-    const off = (window as unknown as { runtime?: { EventsOn?: (n: string, cb: () => void) => void } })
-      .runtime?.EventsOn?.('ui:screenshot', openShot);
+    const off = onEngineEvent('ui:screenshot', openShot);
     return () => {
       window.removeEventListener('ui:screenshot', openShot);
-      off?.();
+      off();
     };
   }, []);
 
