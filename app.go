@@ -6,9 +6,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"feilian/config"
 	"feilian/engine"
+	"feilian/store"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -28,8 +31,9 @@ type SelfInfo struct {
 type App struct {
 	ctx         context.Context
 	engine      *engine.Engine
-	cfgData     config.Data // 本地配置快照（T-M4-5 持久化）
-	recvDirPath string      // 接收目录（设置覆盖；空 = 默认下载目录）
+	cfgData     config.Data  // 本地配置快照（T-M4-5 持久化）
+	recvDirPath string       // 接收目录（设置覆盖；空 = 默认下载目录）
+	db          *store.Store // 聊天记录（T-M4-6）；打开失败仅丢历史功能
 }
 
 func NewApp() *App { return &App{} }
@@ -37,7 +41,19 @@ func NewApp() *App { return &App{} }
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.loadConfig()
+	a.openStore()
 	a.startEngine()
+}
+
+// openStore 打开聊天记录库（与配置同目录）。
+func (a *App) openStore() {
+	base := config.Path()
+	db, err := store.StorePath(filepath.Dir(base))
+	if err != nil {
+		log.Printf("聊天记录库打开失败（历史功能停用）: %v", err)
+		return
+	}
+	a.db = db
 }
 
 // loadConfig 读取本地配置：昵称/部门/状态注入引擎，主题/接收目录等留给前端拉取。
@@ -65,6 +81,9 @@ func (a *App) saveConfig() {
 func (a *App) shutdown(ctx context.Context) {
 	if a.engine != nil {
 		a.engine.Stop()
+	}
+	if a.db != nil {
+		a.db.Close()
 	}
 }
 
@@ -103,7 +122,28 @@ func (a *App) startEngine() {
 // 引擎停止（通道关闭）后协程自然退出。
 func (a *App) pumpEvents() {
 	for ev := range a.engine.Events() {
+		a.recordEvent(ev)
 		runtime.EventsEmit(a.ctx, ev.Type, ev)
+	}
+}
+
+// recordEvent 把消息类事件落到 SQLite（T-M4-6）。失败仅日志，不影响实时聊天。
+func (a *App) recordEvent(ev engine.Event) {
+	if a.db == nil {
+		return
+	}
+	conv := ev.Peer.Nick + "@" + ev.Peer.Host
+	m := store.Message{From: ev.Peer.Nick, SentAt: ev.Time.Unix()}
+	switch ev.Type {
+	case engine.EventMessage:
+		m.Conv, m.Kind, m.Text, m.MsgRef = conv, "text", ev.Text, ev.MsgID
+	case engine.EventFileRequest:
+		m.Conv, m.Kind, m.Text, m.MsgRef = conv, "file", "文件传输", ev.MsgID
+	default:
+		return // presence/receipt/progress 等不落库
+	}
+	if _, err := a.db.Append(m); err != nil {
+		log.Printf("记录落库失败: %v", err)
 	}
 }
 
@@ -118,6 +158,50 @@ func (a *App) IsDesktop() bool { return true }
 
 // GetVersion 关于页用。
 func (a *App) GetVersion() string { return "0.1.0" }
+
+// ---- 聊天记录（T-M4-6）：前端历史加载 / 清空 / 搜索 ----
+
+// History 按会话取历史（before 传空串表示从头取最新一页）。
+func (a *App) History(conv string, before string, limit int) []store.Message {
+	if a.db == nil {
+		return nil
+	}
+	var bt time.Time
+	if before != "" {
+		sec, err := strconv.ParseInt(before, 10, 64)
+		if err == nil {
+			bt = time.Unix(sec, 0)
+		}
+	} else {
+		bt = time.Now().Add(time.Second)
+	}
+	msgs, err := a.db.History(conv, bt, limit)
+	if err != nil {
+		log.Printf("历史查询失败: %v", err)
+		return nil
+	}
+	return msgs
+}
+
+// SearchHistory 全文搜索（M5-T3 前端入口）。
+func (a *App) SearchHistory(conv, keyword string) []store.Message {
+	if a.db == nil {
+		return nil
+	}
+	msgs, err := a.db.Search(conv, keyword, 50)
+	if err != nil {
+		return nil
+	}
+	return msgs
+}
+
+// ClearHistory 清空会话记录。
+func (a *App) ClearHistory(conv string) error {
+	if a.db == nil {
+		return nil
+	}
+	return a.db.ClearConv(conv)
+}
 
 // ---- 文件传输桥接（T-M3-5）----
 

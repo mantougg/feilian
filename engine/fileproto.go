@@ -26,11 +26,11 @@ const fileAttrKeyFeilian = "fl"
 
 // FileEntry 描述一个待传输条目（文件或目录）。
 type FileEntry struct {
-	ID      uint32 `json:"id"`            // fileID，同一消息内唯一；TCP 拉取时凭它定位文件
-	Name    string `json:"name"`          // 展示名（根条目为文件/目录名）
-	Size    int64  `json:"size"`          // 字节数（目录为递归累计）
-	MTime   int64  `json:"mtime"`         // unix 秒
-	Attr    uint32 `json:"attr"`          // FileAttrRegular(0x11) | FileAttrDir(0x13)
+	ID      uint32 `json:"id"`                // fileID，同一消息内唯一；TCP 拉取时凭它定位文件
+	Name    string `json:"name"`              // 展示名（根条目为文件/目录名）
+	Size    int64  `json:"size"`              // 字节数（目录为递归累计）
+	MTime   int64  `json:"mtime"`             // unix 秒
+	Attr    uint32 `json:"attr"`              // FileAttrRegular(0x11) | FileAttrDir(0x13)
 	RelPath string `json:"relPath,omitempty"` // 相对根目录路径（飞联扩展；根条目为空）
 }
 
