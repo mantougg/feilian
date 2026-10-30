@@ -40,12 +40,12 @@
 **验收**：双开 exe 互发消息全链路 OK。✅（发送：本地先出气泡 → SendText 返回 PacketNo 回填消息 id → receipt 命中标「已送达」；失败在气泡下红字标注原因；广播会话走 BroadcastText 无回执。engine.SendText 签名改为返回 (msgID, error)。引擎收发/回执链路单测 6 项全过，wails build 通过；**待用户验证**：双开 exe 界面互发需人工确认）
 **依赖**：T-M2-3。**落点**：`frontend/src/App.tsx` / `components/ChatPanel.tsx`。
 
-## T-M2-5 正在输入 ⬜ <a id="T-M2-5"></a>
+## T-M2-5 正在输入 ✅ <a id="T-M2-5"></a>
 
-- [ ] 输入框停顿 500ms 发 `CmdFeiLinkTyping`
-- [ ] 对端展示三点跳动动画（ChatPanel 已有样式）
+- [x] 输入框停顿 500ms 发 `CmdFeiLinkTyping`
+- [x] 对端展示三点跳动动画（ChatPanel 已有样式）
 
-**验收**：双开可见 typing 指示。
+**验收**：双开可见 typing 指示。✅（引擎收发 CmdFeiLinkTyping 带 TestTypingIndicator 单测；前端输入停顿 500ms 触发、发送后重置、卸载清理；对端 typing 气泡 5s 自消。**修复协议缺陷**：扩展码 0x1001 落在 OptNoPopup 选项位区间，原分发按掩码剥离会把它错认成 CmdBrEntry——现扩展码按完整值精确匹配，约束已登记 protocol.go 注释。**待用户验证**：双开界面可见性需人工确认）
 **依赖**：T-M1-4。
 
 ## T-M2-6 我的资料与状态 ⬜ <a id="T-M2-6"></a>

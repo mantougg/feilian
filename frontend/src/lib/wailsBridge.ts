@@ -30,6 +30,7 @@ interface WailsHost {
         CloseWindow?: () => void;
         GetPeers?: () => Promise<EngineEvent['peer'][]>;
         SendText?: (ip: string, text: string) => Promise<string>;
+        SendTyping?: (ip: string) => Promise<void>;
         BroadcastText?: (text: string) => Promise<void>;
         GetSelf?: () => Promise<SelfInfo>;
         SetSelf?: (nick: string, dept: string, status: string) => Promise<void>;
@@ -94,6 +95,11 @@ export async function setSelf(nick: string, dept: string, status: string): Promi
 /** 返回报文序号（回执关联用）；浏览器形态返回空串（无回执）。 */
 export async function sendText(ip: string, text: string): Promise<string> {
   return (await host().go?.main?.App?.SendText?.(ip, text)) ?? '';
+}
+
+/** 「正在输入」提示（飞联扩展，尽力而为）。 */
+export async function sendTyping(ip: string): Promise<void> {
+  await host().go?.main?.App?.SendTyping?.(ip);
 }
 
 export async function broadcastText(text: string): Promise<void> {

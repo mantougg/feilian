@@ -30,6 +30,7 @@ interface ChatPanelProps {
   contact: Contact;
   messages: ChatMessage[];
   onSendMessage: (text: string) => void;
+  onTyping?: () => void; // 输入停顿 500ms 触发一次（T-M2-5）
   onSendFile: (fileName: string, fileSize: string) => void;
   onSendImage: (imgCap: string) => void;
   onOpenScreenshot: () => void;
@@ -51,6 +52,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   contact,
   messages,
   onSendMessage,
+  onTyping,
   onSendFile,
   onSendImage,
   onOpenScreenshot,
@@ -89,14 +91,32 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setShowMoreMenu(false);
   }, [activeConvId]);
 
+  // 卸载清理 typing 计时器
+  useEffect(() => () => {
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+  }, []);
+
   const handleSend = () => {
     const text = inputText.trim();
     if (!text) return;
     onSendMessage(text);
     setInputText('');
+    if (typingTimer.current) {
+      clearTimeout(typingTimer.current);
+      typingTimer.current = null;
+    }
     setTimeout(() => {
       textareaRef.current?.focus();
     }, 10);
+  };
+
+  // 输入变化：停顿 500ms 触发 onTyping（对端显示三点动画），继续输入则重置计时
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInputText(e.target.value);
+    if (!onTyping) return;
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    typingTimer.current = setTimeout(() => onTyping(), 500);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -556,7 +576,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           <textarea
             ref={textareaRef}
             value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             placeholder="输入消息，Enter 发送 / Shift+Enter 换行"
             rows={2}

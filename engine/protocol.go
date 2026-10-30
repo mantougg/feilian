@@ -37,6 +37,8 @@ const (
 
 // 飞联自定义扩展命令码：仅飞联之间识别，
 // 对飞秋/飞鸽退化为普通消息或被忽略（《飞联-需求文档.md》§4.3）。
+// 注意：0x1000 位与 OptNoPopup 重合，引擎分发时扩展码必须按完整值
+// 精确匹配（见 handlePacket），不可参与标准命令的选项位掩码剥离。
 const (
 	CmdFeiLinkTyping   uint32 = 0x00001001 // 正在输入
 	CmdFeiLinkGroupMsg uint32 = 0x00001002 // 群聊消息

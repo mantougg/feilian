@@ -205,3 +205,32 @@ func TestBroadcastText(t *testing.T) {
 		t.Fatalf("广播报文异常: %+v", got)
 	}
 }
+
+// T-M2-5：收到 CmdFeiLinkTyping 推 EventTyping；SendTyping 发出扩展码报文。
+func TestTypingIndicator(t *testing.T) {
+	e := New(Config{Nick: "我", Hostname: "PC-ME"}, make(chan Event, 8))
+	ch := make(chan Event, 8)
+	e.out = ch
+
+	e.handlePacket(Packet{Version: 1, PacketNo: 2, Nick: "周舟", Host: "PC-ZHOU", Command: CmdFeiLinkTyping}, testAddr)
+	ev := recvEvent(t, ch, EventTyping, time.Second)
+	if ev.Peer.Nick != "周舟" {
+		t.Fatalf("typing 事件对象错误: %+v", ev.Peer)
+	}
+
+	c, cAddr := loopbackPeer(t)
+	attachConn(t, e, make(chan Event, 8))
+	if err := e.SendTyping(fmt.Sprintf("127.0.0.1:%d", cAddr.Port)); err != nil {
+		t.Fatalf("SendTyping: %v", err)
+	}
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	n, _, err := c.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("对端未收到 typing: %v", err)
+	}
+	pkt, ok := ParsePacket(string(buf[:n]))
+	if !ok || pkt.Command != CmdFeiLinkTyping {
+		t.Fatalf("typing 报文异常: %+v ok=%v", pkt, ok)
+	}
+}

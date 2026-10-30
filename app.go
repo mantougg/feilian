@@ -99,6 +99,14 @@ func (a *App) SendText(ip, text string) (string, error) {
 	return a.engine.SendText(ip, text)
 }
 
+// SendTyping 向指定 IP 发送「正在输入」提示（飞联扩展，尽力而为不报错给 UI）。
+func (a *App) SendTyping(ip string) error {
+	if a.engine == nil {
+		return engine.ErrNotStarted
+	}
+	return a.engine.SendTyping(ip)
+}
+
 // BroadcastText 向全网段广播文本消息。
 func (a *App) BroadcastText(text string) error {
 	if a.engine == nil {

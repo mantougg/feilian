@@ -205,6 +205,18 @@ func (e *Engine) readLoop() {
 
 // handlePacket 按命令码分发已解析的报文。
 func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
+	// 飞联扩展码（0x1001/0x1002）本体落在选项位区间（0x1000 = OptNoPopup），
+	// 必须先按完整值精确匹配，再走标准命令的掩码剥离；
+	// 顺序不可颠倒，否则 typing 会被剥成 CmdBrEntry。
+	switch pkt.Command {
+	case CmdFeiLinkTyping:
+		e.emit(Event{Type: EventTyping, Peer: Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String()}, Time: time.Now()})
+		return
+	case CmdFeiLinkGroupMsg:
+		// T-M5-2 群聊：M2 阶段按普通消息呈现
+		e.handleSendMsg(pkt, from)
+		return
+	}
 	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup) {
 	case CmdBrEntry:
 		_, _ = e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
@@ -227,6 +239,16 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 	default:
 		// 未知命令静默忽略，保持与异构客户端（飞秋/飞鸽）兼容
 	}
+}
+
+// SendTyping 向指定地址发送「正在输入」提示（飞联扩展码，无回执、尽力而为）。
+func (e *Engine) SendTyping(dst string) error {
+	ip, port, err := e.resolveAddr(dst)
+	if err != nil {
+		return err
+	}
+	_, err = e.sendPacket(CmdFeiLinkTyping, "", &net.UDPAddr{IP: ip, Port: port})
+	return err
 }
 
 // handleSendMsg 处理收到的文本消息：先建档/刷新（发消息者必在线，

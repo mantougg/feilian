@@ -46,6 +46,7 @@ import {
   getPeers,
   getSelf,
   sendText,
+  sendTyping,
   broadcastText,
   type EngineEvent,
 } from './lib/wailsBridge';
@@ -487,6 +488,10 @@ export default function App() {
                   contact={activeContact}
                   messages={conversations[activeConvId] || []}
                   onSendMessage={handleSendMessage}
+                  onTyping={() => {
+                    const c = contacts[activeConvId];
+                    if (c && !c.isBroadcast && !c.isGroup) sendTyping(c.ip).catch(() => undefined);
+                  }}
                   onSendFile={handleSendFile}
                   onSendImage={handleSendImage}
                   onOpenScreenshot={() => setIsScreenshotOpen(true)}
