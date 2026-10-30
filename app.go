@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 
 	"feilian/engine"
 
@@ -24,8 +25,9 @@ type SelfInfo struct {
 // 网络能力不经由这里 —— 引擎事件走 engine.Engine 的通道，
 // 由 startup 里起的转发协程推到 Wails Events（T-M1-5）。
 type App struct {
-	ctx    context.Context
-	engine *engine.Engine
+	ctx         context.Context
+	engine      *engine.Engine
+	recvDirPath string // 接收目录（设置覆盖；空 = 默认下载目录）
 }
 
 func NewApp() *App { return &App{} }
@@ -80,6 +82,78 @@ func (a *App) IsDesktop() bool { return true }
 
 // GetVersion 关于页用。
 func (a *App) GetVersion() string { return "0.1.0" }
+
+// ---- 文件传输桥接（T-M3-5）----
+
+// PickFiles 弹出文件选择对话框，返回完整路径（取消返回空切片）。
+// Wails v2.17 未暴露多选对话框，M3 先单文件逐个发（文件夹已支持整树）。
+func (a *App) PickFiles() ([]string, error) {
+	p, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择要发送的文件",
+	})
+	if err != nil || p == "" {
+		return nil, err
+	}
+	return []string{p}, nil
+}
+
+// PickFolder 弹出目录选择对话框（发送整个文件夹）。
+func (a *App) PickFolder() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择要发送的文件夹",
+	})
+}
+
+// SendFiles 发送文件/目录到指定 IP，返回消息报文序号。
+func (a *App) SendFiles(ip, text string, paths []string) (string, error) {
+	if a.engine == nil {
+		return "", engine.ErrNotStarted
+	}
+	return a.engine.SendFiles(ip, text, paths)
+}
+
+// AcceptFiles 接受文件请求，落盘到接收目录（重名自动改名）。
+func (a *App) AcceptFiles(reqID string) error {
+	if a.engine == nil {
+		return engine.ErrNotStarted
+	}
+	return a.engine.AcceptFiles(reqID, a.recvDir())
+}
+
+// RejectFiles 拒绝文件请求。
+func (a *App) RejectFiles(reqID string) {
+	if a.engine != nil {
+		a.engine.RejectFiles(reqID)
+	}
+}
+
+// CancelTransfer 取消进行中的接收任务。
+func (a *App) CancelTransfer(reqID string) {
+	if a.engine != nil {
+		a.engine.CancelTransfer(reqID)
+	}
+}
+
+// OpenPath 在资源管理器中打开目录/选中文件（「打开文件夹」按钮）。
+func (a *App) OpenPath(path string) error { return execOpen(path) }
+
+// GetRecvDir 当前接收目录（设置页展示与修改，T-M4-5 持久化）。
+func (a *App) GetRecvDir() string { return a.recvDir() }
+
+// SetRecvDir 设置接收目录（内存态，T-M4-5 落盘）。
+func (a *App) SetRecvDir(dir string) { a.recvDirPath = dir }
+
+// recvDir 返回接收目录：设置值优先，缺省 %USERPROFILE%\Downloads\飞联接收。
+func (a *App) recvDir() string {
+	if a.recvDirPath != "" {
+		return a.recvDirPath
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return filepath.Join(home, "Downloads", "飞联接收")
+}
 
 // ---- 引擎桥接（T-M1-5）：前端经绑定方法驱动引擎，只读 + 动作，不反向写状态 ----
 

@@ -50,7 +50,13 @@ import {
   sendTyping,
   broadcastText,
   setSelf as setSelfProfile,
+  sendFiles,
+  pickFiles,
+  pickFolder,
+  acceptFiles,
+  getRecvDir,
   type EngineEvent,
+  type FileEntryWire,
 } from './lib/wailsBridge';
 import { useEngineEvents } from './hooks/useEngineEvents';
 
@@ -72,6 +78,7 @@ export default function App() {
   const [conversationMeta, setConversationMeta] = useState<Record<string, ConversationMeta>>({});
   const [order, setOrder] = useState<string[]>(['bc']);
   const [settings, setSettings] = useState<AppSettings>(INITIAL_SETTINGS);
+  const [recvDir, setRecvDirState] = useState<string>('');
 
   // Modals state
   const [isScreenshotOpen, setIsScreenshotOpen] = useState(false);
@@ -92,6 +99,7 @@ export default function App() {
         dept: s.dept || '未分组',
         status: peerStatusToUi(s.status),
       }));
+      setRecvDirState(await getRecvDir());
       const peers = await getPeers();
       if (peers.length > 0) {
         setContacts((prev) => {
@@ -169,6 +177,64 @@ export default function App() {
     });
   };
 
+  // 收到文件请求：请求方会话插入传输卡片，随即自动接受（落盘到接收目录，重名自动改名）
+  const handleFileRequest = (ev: EngineEvent) => {
+    if (!ev.files?.length) return;
+    const convId = `${ev.peer.nick}@${ev.peer.host}`;
+    const c = peerToContact(ev.peer);
+    setContacts((prev) => ({ ...prev, [convId]: { ...(prev[convId] || c), ...c } }));
+
+    const time = ev.time ? formatCurrentTime(new Date(ev.time)) : formatCurrentTime();
+    const totalSize = ev.files.reduce((sum: number, fe: FileEntryWire) => sum + (fe.size || 0), 0);
+    const sizeStr = totalSize > 1024 * 1024 ? `${(totalSize / (1024 * 1024)).toFixed(1)} MB` : `${Math.round(totalSize / 1024)} KB`;
+    const dirEntry = ev.files.find((fe) => fe.attr === 19); // 0x13 目录
+    const name = dirEntry?.name || ev.files[0]?.name || '文件';
+
+    const s2 = applyIncomingMessage(
+      { conversations, meta: conversationMeta, order },
+      convId,
+      { id: `req_${ev.msgId}`, t: 'file', from: 'them', who: convId, name: `${c.name} · ${time}`, fileName: name, fileSize: sizeStr, time },
+      activeConvId
+    );
+    setConversations(s2.conversations);
+    setConversationMeta(s2.meta);
+    setOrder(s2.order);
+
+    acceptFiles(ev.msgId).catch(() => undefined);
+  };
+
+  // 传输进度：按 reqId 命中卡片刷新百分比（引擎 500ms 节流）
+  const handleFileProgress = (ev: EngineEvent) => {
+    const cardId = `req_${ev.msgId}`;
+    setConversations((prev) => {
+      for (const [cid, list] of Object.entries(prev)) {
+        const idx = list.findIndex((m) => m.id === cardId);
+        if (idx >= 0) {
+          const nl = [...list];
+          nl[idx] = { ...nl[idx], filePct: ev.progress, fileDone: false };
+          return { ...prev, [cid]: nl };
+        }
+      }
+      return prev;
+    });
+  };
+
+  // 传输完成：卡片置已完成，imgCap 暂存落盘路径
+  const handleFileDone = (ev: EngineEvent) => {
+    const cardId = `req_${ev.msgId}`;
+    setConversations((prev) => {
+      for (const [cid, list] of Object.entries(prev)) {
+        const idx = list.findIndex((m) => m.id === cardId);
+        if (idx >= 0) {
+          const nl = [...list];
+          nl[idx] = { ...nl[idx], fileDone: true, imgCap: ev.text };
+          return { ...prev, [cid]: nl };
+        }
+      }
+      return prev;
+    });
+  };
+
   useEngineEvents({
     peer_online: handlePeerPresence,
     peer_update: handlePeerPresence,
@@ -176,6 +242,9 @@ export default function App() {
     message: handleIncomingMessage,
     typing: handleTyping,
     receipt: handleReceipt,
+    file_request: handleFileRequest,
+    file_progress: handleFileProgress,
+    file_done: handleFileDone,
   });
 
   // Apply dark mode to document element
@@ -338,39 +407,31 @@ export default function App() {
     });
   };
 
-  // Send file card
-  const handleSendFile = (fileName: string, fileSize: string) => {
+  // 发送文件/文件夹（T-M3-5）：Wails 选盘 → 引擎 SendFiles → 本地出卡片
+  const handlePickAndSendFiles = async (kind: 'file' | 'folder') => {
+    if (!activeConvId) return;
+    const paths = kind === 'file' ? await pickFiles() : [await pickFolder()].filter(Boolean);
+    if (!paths.length) return;
     const targetId = activeConvId;
+    const contact = contacts[targetId];
+    if (contact?.isBroadcast) return; // 广播通道不发文件
+
+    const msgId = await sendFiles(contact?.ip || targetId, '', paths).catch(() => '');
+    const first = paths[0];
+    const name = first.split(/[\/]/).pop() || first;
     const currentTime = formatCurrentTime();
-    const newMsgId = `f_${Date.now()}`;
-
-    setConversations((prev) => {
-      const currentList = prev[targetId] || [];
-      return {
-        ...prev,
-        [targetId]: [
-          ...currentList,
-          {
-            id: newMsgId,
-            t: 'file',
-            from: 'me',
-            fileName,
-            fileSize,
-            fileDone: true,
-            time: currentTime,
-          },
-        ],
-      };
-    });
-
-    setOrder((prev) => bumpConversationOrder(prev, targetId));
-    setConversationMeta((prev) => ({
+    setConversations((prev) => ({
       ...prev,
-      [targetId]: {
+      [targetId]: [...(prev[targetId] || []), {
+        id: msgId ? `sent_${msgId}` : `f_${Date.now()}`,
+        t: 'file',
+        from: 'me',
+        fileName: name + (paths.length > 1 ? ` 等 ${paths.length} 项` : ''),
+        fileDone: true,
         time: currentTime,
-        unread: 0,
-      },
+      } as ChatMessage],
     }));
+    setOrder((prev) => bumpConversationOrder(prev, targetId));
   };
 
   // Send image message
@@ -496,7 +557,9 @@ export default function App() {
                     const c = contacts[activeConvId];
                     if (c && !c.isBroadcast && !c.isGroup) sendTyping(c.ip).catch(() => undefined);
                   }}
-                  onSendFile={handleSendFile}
+                  onPickFiles={() => handlePickAndSendFiles('file')}
+                  onPickFolder={() => handlePickAndSendFiles('folder')}
+                  onSendFile={() => handlePickAndSendFiles('file')} // 浏览器形态无路径，退化为选盘
                   onSendImage={handleSendImage}
                   onOpenScreenshot={() => setIsScreenshotOpen(true)}
                   onOpenRemoteAssist={() => setIsRemoteAssistOpen(true)}

@@ -20,6 +20,18 @@ export interface EngineEvent {
   text: string;
   time: string;
   broadcast?: boolean; // 局域网广播消息（路由到 bc 会话）
+  files?: FileEntryWire[]; // 文件请求条目（file_request 事件）
+  progress?: number; // 0-100（file_progress 事件）
+}
+
+/** engine.FileEntry 的线格式（attr 十六进制字符串转的数值）。 */
+export interface FileEntryWire {
+  id: number;
+  name: string;
+  size: number;
+  mtime: number;
+  attr: number; // 0x11 文件 / 0x13 目录（17/19）
+  relPath?: string;
 }
 
 interface WailsHost {
@@ -35,6 +47,13 @@ interface WailsHost {
         BroadcastText?: (text: string) => Promise<void>;
         GetSelf?: () => Promise<SelfInfo>;
         SetSelf?: (nick: string, dept: string, status: string) => Promise<void>;
+        PickFiles?: () => Promise<string[]>;
+        PickFolder?: () => Promise<string>;
+        SendFiles?: (ip: string, text: string, paths: string[]) => Promise<string>;
+        AcceptFiles?: (reqId: string) => Promise<void>;
+        RejectFiles?: (reqId: string) => Promise<void>;
+        OpenPath?: (path: string) => Promise<void>;
+        GetRecvDir?: () => Promise<string>;
       };
     };
   };
@@ -111,4 +130,38 @@ export async function broadcastText(text: string): Promise<void> {
 export function onEngineEvent(name: string, cb: (ev: EngineEvent) => void): () => void {
   const off = host().runtime?.EventsOn?.(name, cb);
   return off ?? (() => undefined);
+}
+
+// ---- 文件传输（T-M3-5）；浏览器形态全部降级为空操作 ----
+
+/** 弹出文件选择，返回路径列表（浏览器形态返回空 = 用户取消）。 */
+export async function pickFiles(): Promise<string[]> {
+  return (await host().go?.main?.App?.PickFiles?.()) ?? [];
+}
+
+/** 弹出目录选择（浏览器形态返回空串）。 */
+export async function pickFolder(): Promise<string> {
+  return (await host().go?.main?.App?.PickFolder?.()) ?? '';
+}
+
+/** 发送文件/目录，返回消息报文序号（浏览器形态空串）。 */
+export async function sendFiles(ip: string, text: string, paths: string[]): Promise<string> {
+  return (await host().go?.main?.App?.SendFiles?.(ip, text, paths)) ?? '';
+}
+
+export async function acceptFiles(reqId: string): Promise<void> {
+  await host().go?.main?.App?.AcceptFiles?.(reqId);
+}
+
+export async function rejectFiles(reqId: string): Promise<void> {
+  host().go?.main?.App?.RejectFiles?.(reqId);
+}
+
+/** 在资源管理器中打开路径。 */
+export async function openPath(path: string): Promise<void> {
+  await host().go?.main?.App?.OpenPath?.(path);
+}
+
+export async function getRecvDir(): Promise<string> {
+  return (await host().go?.main?.App?.GetRecvDir?.()) ?? '';
 }

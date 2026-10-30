@@ -31,7 +31,9 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   onSendMessage: (text: string) => void;
   onTyping?: () => void; // 输入停顿 500ms 触发一次（T-M2-5）
-  onSendFile: (fileName: string, fileSize: string) => void;
+  onPickFiles?: () => void;    // Wails 选盘发文件（桌面形态）
+  onPickFolder?: () => void;   // Wails 选盘发文件夹
+  onSendFile: (fileName: string, fileSize: string) => void; // 浏览器形态回退
   onSendImage: (imgCap: string) => void;
   onOpenScreenshot: () => void;
   onOpenRemoteAssist: () => void;
@@ -53,6 +55,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   messages,
   onSendMessage,
   onTyping,
+  onPickFiles,
+  onPickFolder,
   onSendFile,
   onSendImage,
   onOpenScreenshot,
@@ -132,6 +136,21 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     textareaRef.current?.focus();
   };
 
+  const handlePickFile = () => {
+    if (onPickFiles) {
+      onPickFiles();
+      return;
+    }
+    fileInputRef.current?.click(); // 浏览器预览形态回退
+  };
+  const handlePickFolder = () => {
+    if (onPickFolder) {
+      onPickFolder();
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -154,9 +173,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     e.target.value = '';
   };
 
-  const handleOpenFolder = (name: string) => {
-    setFolderNotification(`已在文件资源管理器中定位: D:\\FeiLink\\接收\\${name}`);
-    setTimeout(() => setFolderNotification(null), 3500);
+  const handleOpenFolder = async (msg: ChatMessage) => {
+    const p = msg.imgCap; // file_done 时引擎写入的落盘路径
+    if (p) {
+      const { openPath } = await import('../lib/wailsBridge');
+      await openPath(p).catch(() => undefined);
+      setFolderNotification(`已打开: ${p}`);
+      setTimeout(() => setFolderNotification(null), 3500);
+    }
   };
 
   return (
@@ -456,7 +480,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                           <span>·</span>
                           <button
                             type="button"
-                            onClick={() => handleOpenFolder(m.fileName || '文件')}
+                            onClick={() => handleOpenFolder(m)}
                             className="text-[var(--acc)] hover:underline cursor-pointer"
                           >
                             打开文件夹
