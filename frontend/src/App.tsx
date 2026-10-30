@@ -105,6 +105,12 @@ export default function App() {
         dept: s.dept || '未分组',
         status: peerStatusToUi(s.status),
       }));
+      // 联系人列表里的「我」条目同步真实资料（否则残留 127.0.0.1 占位，
+      // 给自己发消息会打到回环地址——真机排查 T-M2 冒烟时发现）
+      setContacts((prev) => ({
+        ...prev,
+        self: { ...prev.self, name: s.nick, char: s.nick.slice(0, 1) || '我', host: s.hostname, ip: s.ip, dept: s.dept || '未分组' },
+      }));
       setRecvDirState(await getRecvDir());
       const peers = await getPeers();
       if (peers.length > 0) {
@@ -340,8 +346,9 @@ export default function App() {
     }
   };
 
-  // Open conversation from contact list or profile
+  // Open conversation from contact list or profile（自己不与自己开会话）
   const handleOpenContactChat = (contactId: string) => {
+    if (contactId === 'self') return;
     setActiveView('chats');
     handleSelectConv(contactId);
     setMobilePane('chat');

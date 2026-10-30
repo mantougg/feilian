@@ -311,7 +311,13 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                 <p className="text-xs text-[var(--mut)] leading-relaxed">
                   正在探测局域网在线同事…
                   <br />
-                  确认其他设备已运行飞联并放行 UDP 2425
+                  本机 IP：<span className="tabular-nums">{selfUser.ip || '获取中'}</span>
+                  <br />
+                  <span className="mt-1 block text-[10px] leading-relaxed opacity-80">
+                    若长时间无人出现：放行 Windows 防火墙入站
+                    <br />
+                    UDP/TCP 2425（首次运行时的弹窗请选「允许」）
+                  </span>
                 </p>
               </div>
             )}
