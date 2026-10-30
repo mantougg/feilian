@@ -117,11 +117,14 @@ export default function App() {
     setContacts((prev) => (prev[id] ? { ...prev, [id]: { ...prev[id], status: 'off' } } : prev));
   };
 
-  // 收到文本消息：补全联系人 → 追加气泡 → 置顶/未读/预览（applyIncomingMessage 纯函数）
+  // 收到文本消息：单聊按发送者建会话，广播统一路由到 bc 会话（T-M2-7 按来源人显示）；
+  // 补全联系人 → 追加气泡 → 置顶/未读/预览（applyIncomingMessage 纯函数）
   const handleIncomingMessage = (ev: EngineEvent) => {
-    const convId = `${ev.peer.nick}@${ev.peer.host}`;
     const c = peerToContact(ev.peer);
-    setContacts((prev) => ({ ...prev, [convId]: { ...(prev[convId] || c), ...c } }));
+    const convId = ev.broadcast ? 'bc' : `${ev.peer.nick}@${ev.peer.host}`;
+    if (!ev.broadcast) {
+      setContacts((prev) => ({ ...prev, [convId]: { ...(prev[convId] || c), ...c } }));
+    }
 
     const time = ev.time ? formatCurrentTime(new Date(ev.time)) : formatCurrentTime();
     const next = applyIncomingMessage(

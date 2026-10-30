@@ -234,3 +234,23 @@ func TestTypingIndicator(t *testing.T) {
 		t.Fatalf("typing 报文异常: %+v ok=%v", pkt, ok)
 	}
 }
+
+// T-M2-7：广播消息（CmdSendMsg|OptBroadcast）的 Event 携带 Broadcast 标志，
+// 单聊消息不带。
+func TestMessageBroadcastFlag(t *testing.T) {
+	e := New(Config{Nick: "我", Hostname: "PC-ME"}, make(chan Event, 8))
+	ch := make(chan Event, 8)
+	e.out = ch
+
+	e.handlePacket(Packet{Version: 1, PacketNo: 1, Nick: "王强", Host: "PC-W", Command: CmdSendMsg | OptBroadcast, Extra: "全员注意"}, testAddr)
+	ev := recvEvent(t, ch, EventMessage, time.Second)
+	if !ev.Broadcast {
+		t.Fatal("广播消息未携带 Broadcast 标志")
+	}
+
+	e.handlePacket(Packet{Version: 1, PacketNo: 2, Nick: "王强", Host: "PC-W", Command: CmdSendMsg | OptSendCheck, Extra: "单聊"}, testAddr)
+	ev = recvEvent(t, ch, EventMessage, time.Second)
+	if ev.Broadcast {
+		t.Fatal("单聊消息不应携带 Broadcast 标志")
+	}
+}

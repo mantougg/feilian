@@ -48,11 +48,12 @@ type Peer struct {
 
 // Event 是引擎推给 UI 的事件。字段按 Type 取用，其余为零值。
 type Event struct {
-	Type  string    `json:"type"`
-	Peer  Peer      `json:"peer"`
-	MsgID string    `json:"msgId"` // 我方报文 PacketNo 的字符串形式（回执匹配用）
-	Text  string    `json:"text"`  // 文本内容 / 错误信息
-	Time  time.Time `json:"time"`
+	Type      string    `json:"type"`
+	Peer      Peer      `json:"peer"`
+	MsgID     string    `json:"msgId"` // 我方报文 PacketNo 的字符串形式（回执匹配用）
+	Text      string    `json:"text"`  // 文本内容 / 错误信息
+	Time      time.Time `json:"time"`
+	Broadcast bool      `json:"broadcast"` // 该消息来自局域网广播（CmdSendMsg|OptBroadcast）
 }
 
 // Config 引擎配置（M1 由 app.go 从本地配置读取，M4-T 持久化）。
@@ -273,11 +274,12 @@ func (e *Engine) handleSendMsg(pkt Packet, from *net.UDPAddr) {
 		peer.Dept, peer.Status = p.Dept, p.Status
 	}
 	e.emit(Event{
-		Type:  EventMessage,
-		Peer:  peer,
-		MsgID: strconv.FormatUint(pkt.PacketNo, 10),
-		Text:  DecodeExtra(pkt.Extra), // 飞秋报文可能是 GBK，按首包探测解码
-		Time:  time.Now(),
+		Type:      EventMessage,
+		Peer:      peer,
+		MsgID:     strconv.FormatUint(pkt.PacketNo, 10),
+		Text:      DecodeExtra(pkt.Extra), // 飞秋报文可能是 GBK，按首包探测解码
+		Time:      time.Now(),
+		Broadcast: pkt.HasOpt(OptBroadcast),
 	})
 }
 

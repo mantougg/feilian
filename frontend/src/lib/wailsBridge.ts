@@ -19,6 +19,7 @@ export interface EngineEvent {
   msgId: string;
   text: string;
   time: string;
+  broadcast?: boolean; // 局域网广播消息（路由到 bc 会话）
 }
 
 interface WailsHost {
