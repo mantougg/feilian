@@ -19,6 +19,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [name, setName] = useState(selfUser.name);
   const [status, setStatus] = useState<UserStatus>(selfUser.status);
   const [sign, setSign] = useState(selfUser.sign || '');
+  const [dept, setDept] = useState(selfUser.dept);
   const [broadcasted, setBroadcasted] = useState(false);
 
   if (!isOpen) return null;
@@ -28,6 +29,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     onUpdateSelfUser({
       name: name.trim(),
       char: name.trim().slice(0, 1),
+      dept: dept.trim(),
       status,
       sign: sign.trim(),
     });
@@ -50,7 +52,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         <div className="px-4 py-3 border-b border-[var(--line)] flex items-center justify-between">
           <div className="flex items-center gap-2">
             <UserCheck className="w-4 h-4 text-[var(--acc)]" />
-            <h3 className="text-sm font-medium text-[var(--text)]">本机用户设置 (周舟)</h3>
+            <h3 className="text-sm font-medium text-[var(--text)]">本机用户设置</h3>
           </div>
           <button
             type="button"
@@ -104,7 +106,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           <div className="space-y-1">
             <label className="text-[11px] text-[var(--mut)] font-medium">在线状态 (即时广播)</label>
             <div className="grid grid-cols-3 gap-2">
-              {(['ok', 'busy', 'off'] as UserStatus[]).map((st) => (
+              {(['ok', 'busy', 'away'] as UserStatus[]).map((st) => (
                 <button
                   key={st}
                   type="button"
@@ -123,6 +125,18 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Department input */}
+          <div className="space-y-1">
+            <label className="text-[11px] text-[var(--mut)] font-medium">部门 / 分组</label>
+            <input
+              type="text"
+              value={dept}
+              onChange={(e) => setDept(e.target.value)}
+              className="w-full h-8 px-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel2)] text-xs text-[var(--text)] outline-none focus:border-[var(--acc)]"
+              placeholder="如：研发中心"
+            />
           </div>
 
           {/* Personal signature */}

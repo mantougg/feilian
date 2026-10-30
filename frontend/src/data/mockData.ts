@@ -34,6 +34,7 @@ export const BROADCAST_CONTACT: Contact = {
 export const STATUS_LABELS: Record<string, string> = {
   ok: '在线',
   busy: '勿扰',
+  away: '离开',
   off: '离线',
   bc: '广播',
   grp: '群聊',
@@ -42,6 +43,7 @@ export const STATUS_LABELS: Record<string, string> = {
 export const STATUS_COLORS: Record<string, string> = {
   ok: '#22c55e',
   busy: '#ef4444',
+  away: '#f59e0b',
   off: '#94a3b8',
   bc: '#4f46e5',
   grp: '#0ea5e9',

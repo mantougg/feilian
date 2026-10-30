@@ -48,12 +48,12 @@
 **验收**：双开可见 typing 指示。✅（引擎收发 CmdFeiLinkTyping 带 TestTypingIndicator 单测；前端输入停顿 500ms 触发、发送后重置、卸载清理；对端 typing 气泡 5s 自消。**修复协议缺陷**：扩展码 0x1001 落在 OptNoPopup 选项位区间，原分发按掩码剥离会把它错认成 CmdBrEntry——现扩展码按完整值精确匹配，约束已登记 protocol.go 注释。**待用户验证**：双开界面可见性需人工确认）
 **依赖**：T-M1-4。
 
-## T-M2-6 我的资料与状态 ⬜ <a id="T-M2-6"></a>
+## T-M2-6 我的资料与状态 ✅ <a id="T-M2-6"></a>
 
-- [ ] `UserProfileModal` → `SetSelf`（昵称/部门/状态）
-- [ ] 变更即广播 `CmdBrAbsence`
+- [x] `UserProfileModal` → `SetSelf`（昵称/部门/状态）
+- [x] 变更即广播 `CmdBrAbsence`
 
-**验收**：A 改状态，B 侧徽标/资料即时变化。
+**验收**：A 改状态，B 侧徽标/资料即时变化。✅（Modal 补部门输入与「离开」状态；引擎 SetSelf 语义修正：昵称变更重广播 CmdBrEntry（主键变了）、仅状态变更广播 CmdBrAbsence（IPMsg 语义），TestSetSelfBroadcast 验证双路径；UI 状态 ↔ 引擎状态双向映射纯函数带单测。**待用户验证**：B 侧实时刷新需双开人工确认）
 **依赖**：T-M1-3。**落点**：`frontend/src/components/UserProfileModal.tsx`。
 
 ## T-M2-7 广播会话 ⬜ <a id="T-M2-7"></a>

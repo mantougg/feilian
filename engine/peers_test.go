@@ -90,3 +90,47 @@ func TestSweepTimeout(t *testing.T) {
 		t.Fatalf("心跳不应建档: %+v", e.Peers())
 	}
 }
+
+// T-M2-6：SetSelf 昵称变更重广播 Entry；仅状态变更广播 Absence。
+func TestSetSelfBroadcast(t *testing.T) {
+	// 接收端用同端口双绑（0.0.0.0）：广播包投递到网卡广播地址，
+	// 只绑定 127.0.0.1 的 socket 收不到（TestBroadcastLoopback 已验证广播路径本身）
+	port := freePort(t)
+	c, _, err := listenUDP(port)
+	if err != nil {
+		t.Fatalf("接收端双绑: %v", err)
+	}
+	defer c.Close()
+	e := New(Config{Nick: "旧名", Hostname: "PC-ME", Port: port, Status: StatusOnline}, make(chan Event, 8))
+	attachConn(t, e, make(chan Event, 8))
+
+	// 仅状态变更 → Absence
+	e.SetSelf("", "", StatusBusy)
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1024)
+	n, _, err := c.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("未收到 Absence 广播: %v", err)
+	}
+	pkt, ok := ParsePacket(string(buf[:n]))
+	if !ok || pkt.Command&^OptNoPopup != CmdBrAbsence {
+		t.Fatalf("期望 Absence，得到: %+v ok=%v", pkt, ok)
+	}
+
+	// 昵称变更 → Entry（广播多地址投递会有重复份，读到目标报文为止）
+	e.SetSelf("新名", "研发部", "")
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		n, _, err = c.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("未收到 Entry 广播: %v", err)
+		}
+		pkt, ok = ParsePacket(string(buf[:n]))
+		if ok && pkt.Command == CmdBrEntry {
+			break
+		}
+	}
+	if pkt.Nick != "新名" {
+		t.Fatalf("Entry 昵称 = %q", pkt.Nick)
+	}
+}

@@ -36,6 +36,7 @@ import {
   formatCurrentTime,
   peerToContact,
   peerStatusToUi,
+  uiStatusToPeer,
   applyIncomingMessage,
 } from './utils/chatLogic';
 import {
@@ -48,6 +49,7 @@ import {
   sendText,
   sendTyping,
   broadcastText,
+  setSelf as setSelfProfile,
   type EngineEvent,
 } from './lib/wailsBridge';
 import { useEngineEvents } from './hooks/useEngineEvents';
@@ -415,14 +417,13 @@ export default function App() {
     }));
   };
 
-  // Update self profile
+  // Update self profile（T-M2-6）：本地即时生效 + SetSelf 全网广播
+  // （引擎侧语义：昵称/部门变更重广播 Entry，状态变更广播 Absence）
   const handleUpdateSelfUser = (updated: Partial<Contact>) => {
     const newSelf = { ...selfUser, ...updated };
     setSelfUser(newSelf);
-    setContacts((prev) => ({
-      ...prev,
-      self: newSelf,
-    }));
+    setContacts((prev) => ({ ...prev, self: newSelf }));
+    setSelfProfile(newSelf.name, newSelf.dept, uiStatusToPeer(newSelf.status)).catch(() => undefined);
   };
 
   const activeContact = activeConvId ? contacts[activeConvId] : undefined;

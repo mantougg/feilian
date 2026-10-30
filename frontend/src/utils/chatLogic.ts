@@ -160,3 +160,10 @@ export function applyIncomingMessage(
     order: bumpConversationOrder(state.order, convId),
   };
 }
+
+/** UI UserStatus → 引擎 status（SetSelf 用；off 不是可广播状态，映射为 away）。 */
+export function uiStatusToPeer(status: Contact['status']): string {
+  if (status === 'ok') return 'online';
+  if (status === 'busy') return 'busy';
+  return 'away';
+}

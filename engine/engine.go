@@ -100,17 +100,26 @@ func (e *Engine) Self() Config { return e.cfg }
 // SetSelf 更新本机资料（昵称/部门/状态）并重新广播上线，让全网刷新；
 // 留空字段保持不变，非法状态值忽略。
 func (e *Engine) SetSelf(nick, dept, status string) {
+	nickChanged := nick != "" && nick != e.cfg.Nick
 	if nick != "" {
 		e.cfg.Nick = nick
 	}
 	if dept != "" {
 		e.cfg.Dept = dept
 	}
+	statusChanged := false
 	switch status {
 	case StatusOnline, StatusBusy, StatusAway:
+		statusChanged = status != e.cfg.Status
 		e.cfg.Status = status
 	}
-	e.broadcastPresence(CmdBrEntry)
+	if nickChanged {
+		// 昵称是用户表主键的一半，变更须重新 Entry 让对端重建条目
+		e.broadcastPresence(CmdBrEntry)
+	} else if statusChanged {
+		// 仅状态变化走 Absence（IPMsg 语义：在线状态广播）
+		e.broadcastPacket(CmdBrAbsence, e.presenceJSON())
+	}
 }
 
 // heartbeatInterval 是心跳周期；offlineTimeout 内收不到任何报文即判离线。
