@@ -34,6 +34,8 @@ export interface ChatMessage {
   fileSpeed?: string;
   // Image props
   imgCap?: string;
+  // 送达回执（T-M2-4：receipt 事件按 msgId 命中后置 true）
+  delivered?: boolean;
 }
 
 export interface ConversationMeta {

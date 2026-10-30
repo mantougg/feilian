@@ -36,6 +36,7 @@ import {
   formatCurrentTime,
   peerToContact,
   peerStatusToUi,
+  applyIncomingMessage,
 } from './utils/chatLogic';
 import {
   isDesktop,
@@ -44,7 +45,9 @@ import {
   closeWindow,
   getPeers,
   getSelf,
+  type EngineEvent,
 } from './lib/wailsBridge';
+import { useEngineEvents } from './hooks/useEngineEvents';
 
 export default function App() {
   // Application view state
@@ -94,6 +97,78 @@ export default function App() {
       }
     })();
   }, []);
+
+  // ---- 引擎事件处理（T-M2-2/T-M2-3）----
+
+  // peer 上线/资料变更：upsert 联系人（保留旧字段，如签名等 UI 侧数据）
+  const handlePeerPresence = (ev: EngineEvent) => {
+    const c = peerToContact(ev.peer);
+    setContacts((prev) => ({ ...prev, [c.id]: { ...(prev[c.id] || {}), ...c } }));
+  };
+
+  // peer 下线：仅标记离线（保留在列表，飞秋语义：离线用户仍可见）
+  const handlePeerOffline = (ev: EngineEvent) => {
+    const id = `${ev.peer.nick}@${ev.peer.host}`;
+    setContacts((prev) => (prev[id] ? { ...prev, [id]: { ...prev[id], status: 'off' } } : prev));
+  };
+
+  // 收到文本消息：补全联系人 → 追加气泡 → 置顶/未读/预览（applyIncomingMessage 纯函数）
+  const handleIncomingMessage = (ev: EngineEvent) => {
+    const convId = `${ev.peer.nick}@${ev.peer.host}`;
+    const c = peerToContact(ev.peer);
+    setContacts((prev) => ({ ...prev, [convId]: { ...(prev[convId] || c), ...c } }));
+
+    const time = ev.time ? formatCurrentTime(new Date(ev.time)) : formatCurrentTime();
+    const next = applyIncomingMessage(
+      { conversations, meta: conversationMeta, order },
+      convId,
+      { id: ev.msgId || `r_${Date.now()}`, t: 'them', who: convId, name: `${c.name} · ${time}`, text: ev.text, time },
+      activeConvId
+    );
+    setConversations(next.conversations);
+    setConversationMeta(next.meta);
+    setOrder(next.order);
+  };
+
+  // 对端正在输入：显示 typing 指示，5 秒无后续自动消退
+  const handleTyping = (ev: EngineEvent) => {
+    const convId = `${ev.peer.nick}@${ev.peer.host}`;
+    setConversations((prev) => {
+      const list = (prev[convId] || []).filter((m) => m.t !== 'typing');
+      return { ...prev, [convId]: [...list, { id: `typing_${convId}`, t: 'typing', who: convId }] };
+    });
+    setTimeout(() => {
+      setConversations((prev) => {
+        if (!(prev[convId] || []).some((m) => m.id === `typing_${convId}`)) return prev;
+        return { ...prev, [convId]: prev[convId].filter((m) => m.id !== `typing_${convId}`) };
+      });
+    }, 5000);
+  };
+
+  // 对端回执：按报文序号命中我方消息，标记已送达
+  const handleReceipt = (ev: EngineEvent) => {
+    if (!ev.msgId) return;
+    setConversations((prev) => {
+      for (const [cid, list] of Object.entries(prev)) {
+        const idx = list.findIndex((m) => m.id === ev.msgId);
+        if (idx >= 0) {
+          const nl = [...list];
+          nl[idx] = { ...nl[idx], delivered: true };
+          return { ...prev, [cid]: nl };
+        }
+      }
+      return prev;
+    });
+  };
+
+  useEngineEvents({
+    peer_online: handlePeerPresence,
+    peer_update: handlePeerPresence,
+    peer_offline: handlePeerOffline,
+    message: handleIncomingMessage,
+    typing: handleTyping,
+    receipt: handleReceipt,
+  });
 
   // Apply dark mode to document element
   useEffect(() => {

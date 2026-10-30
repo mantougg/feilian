@@ -15,13 +15,13 @@
 **验收**：UI 无 mock 依赖。✅（mock 只剩 self 占位 + 广播常量 + 状态色表；联系人 id = 引擎主键 `nick@host`；挂载时 GetPeers/GetSelf 拉快照，增量靠事件（T-M2-2）；联系人视图改按部门动态分组（chatLogic.groupContactsByDept 带单测）；无在线用户显示空态。顺带完成 T-M2-3 的「删除自动回复模拟」——AUTOMATIC_REPLIES 与 mock 会话一并退场）
 **依赖**：T-M1-5。
 
-## T-M2-2 事件订阅 ⬜ <a id="T-M2-2"></a>
+## T-M2-2 事件订阅 ✅ <a id="T-M2-2"></a>
 
-- [ ] 封装 `useEngineEvents`（Wails `EventsOn` → React state）
-- [ ] 覆盖事件：peer_online / peer_offline / peer_update / message / receipt / typing
+- [x] 封装 `useEngineEvents`（Wails `EventsOn` → React state）
+- [x] 覆盖事件：peer_online / peer_offline / peer_update / message / receipt / typing
 
-**验收**：上线/下线实时反映在联系人与会话列表。
-**依赖**：T-M1-5。**落点**：`frontend/src/lib/` 或 `frontend/src/hooks/` 新文件。
+**验收**：上线/下线实时反映在联系人与会话列表。✅（六类事件全部接入：presence upsert 联系人、offline 标离线保留列表、message 走 applyIncomingMessage 纯函数、typing 指示 5s 自消、receipt 按 msgId 标送达。浏览器形态订阅降级 no-op。**待用户验证**：双开 exe 的实时性需人工确认，引擎侧事件流已由 M1 单测覆盖）
+**依赖**：T-M1-5。**落点**：`frontend/src/hooks/useEngineEvents.ts`。
 
 ## T-M2-3 会话状态真实化 ⬜ <a id="T-M2-3"></a>
 

@@ -128,3 +128,35 @@ export function filterContacts(contacts: Contact[], query: string): Contact[] {
     );
   });
 }
+
+/** 会话三态（消息表/元数据/排序）整体快照，applyIncomingMessage 的输入输出。 */
+export interface ConversationState {
+  conversations: Record<string, ChatMessage[]>;
+  meta: Record<string, ConversationMeta>;
+  order: string[];
+}
+
+/**
+ * 应用一条入站消息（T-M2-3）：追加气泡（清掉对端 typing 残留）、
+ * 会话置顶、时间预览刷新；未读只在「会话未打开」时累加。
+ */
+export function applyIncomingMessage(
+  state: ConversationState,
+  convId: string,
+  msg: ChatMessage,
+  activeConvId: string
+): ConversationState {
+  const list = (state.conversations[convId] || []).filter((m) => m.t !== 'typing');
+  const prevMeta = state.meta[convId] || { time: '', unread: 0 };
+  return {
+    conversations: { ...state.conversations, [convId]: [...list, msg] },
+    meta: {
+      ...state.meta,
+      [convId]: {
+        time: msg.time || prevMeta.time,
+        unread: activeConvId === convId ? 0 : prevMeta.unread + 1,
+      },
+    },
+    order: bumpConversationOrder(state.order, convId),
+  };
+}
