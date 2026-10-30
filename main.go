@@ -13,6 +13,7 @@ var assets embed.FS
 
 func main() {
 	app := NewApp()
+	app.startTray()
 
 	err := wails.Run(&options.App{
 		Title:            "飞联 LANChat",

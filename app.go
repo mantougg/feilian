@@ -156,7 +156,14 @@ func (a *App) recordEvent(ev engine.Event) {
 
 func (a *App) Minimize()       { runtime.WindowMinimise(a.ctx) }
 func (a *App) ToggleMaximize() { runtime.WindowToggleMaximise(a.ctx) }
-func (a *App) CloseWindow()    { runtime.Quit(a.ctx) }
+// CloseWindow 默认隐藏进托盘（T-M4-2），配置 closeToTray=false 时直接退出。
+func (a *App) CloseWindow() {
+	if a.cfgData.CloseToTrayEnabled() {
+		runtime.Hide(a.ctx)
+		return
+	}
+	runtime.Quit(a.ctx)
+}
 
 // IsDesktop 供前端区分「Wails 桌面运行」与「纯浏览器预览」两种形态。
 func (a *App) IsDesktop() bool { return true }

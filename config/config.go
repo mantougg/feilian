@@ -21,6 +21,7 @@ type Data struct {
 	ScreenshotHot string `json:"screenshotHot"` // 截图热键（展示用，注册见 T-M4-4）
 	SearchHot     string `json:"searchHot"`     // 全局搜索热键
 	AutoLaunch    bool   `json:"autoLaunch"`    // 开机自启动
+	CloseToTray   *bool  `json:"closeToTray"`   // 关闭进托盘（nil/true=是；显式 false 退出）
 }
 
 // Path 返回配置文件路径：%APPDATA%/feilian/config.json（非 Windows 用 ~/.config）。
@@ -74,3 +75,6 @@ var pathOverride string
 
 // SetPathForTest 重定向配置路径（仅测试使用）。
 func SetPathForTest(p string) { pathOverride = p }
+
+// CloseToTrayEnabled 读指针语义（nil 视为 true：默认关闭进托盘）。
+func (d Data) CloseToTrayEnabled() bool { return d.CloseToTray == nil || *d.CloseToTray }
