@@ -91,10 +91,10 @@ func (a *App) GetPeers() []engine.Peer {
 	return a.engine.Peers()
 }
 
-// SendText 向指定 IP 发送文本消息。
-func (a *App) SendText(ip, text string) error {
+// SendText 向指定 IP 发送文本消息，返回报文 PacketNo 字符串（回执关联用）。
+func (a *App) SendText(ip, text string) (string, error) {
 	if a.engine == nil {
-		return engine.ErrNotStarted
+		return "", engine.ErrNotStarted
 	}
 	return a.engine.SendText(ip, text)
 }

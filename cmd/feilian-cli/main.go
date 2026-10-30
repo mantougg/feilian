@@ -62,7 +62,7 @@ func main() {
 	}()
 
 	if *to != "" {
-		if err := e.SendText(*to, "冒烟测试消息（feilian-cli）"); err != nil {
+		if _, err := e.SendText(*to, "冒烟测试消息（feilian-cli）"); err != nil {
 			fmt.Fprintln(os.Stderr, "发送失败:", err)
 			os.Exit(1)
 		}
@@ -82,7 +82,7 @@ func main() {
 			fmt.Println("格式：IP[:端口] 消息内容")
 			continue
 		}
-		if err := e.SendText(strings.TrimSpace(dst), strings.TrimSpace(text)); err != nil {
+		if _, err := e.SendText(strings.TrimSpace(dst), strings.TrimSpace(text)); err != nil {
 			fmt.Println("发送失败:", err)
 		}
 	}

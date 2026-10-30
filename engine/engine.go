@@ -207,7 +207,7 @@ func (e *Engine) readLoop() {
 func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 	switch pkt.Command &^ (OptSendCheck | OptSecret | OptBroadcast | OptMulticast | OptNoPopup) {
 	case CmdBrEntry:
-		e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
+		_, _ = e.sendPacket(CmdAnsEntry, e.presenceJSON(), from)
 		e.upsertPresence(pkt, from)
 	case CmdAnsEntry:
 		e.upsertPresence(pkt, from)
@@ -235,7 +235,7 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 func (e *Engine) handleSendMsg(pkt Packet, from *net.UDPAddr) {
 	e.upsertPresence(pkt, from)
 	if pkt.HasOpt(OptSendCheck) {
-		_ = e.sendPacket(CmdRecvMsg, strconv.FormatUint(pkt.PacketNo, 10), from)
+		_, _ = e.sendPacket(CmdRecvMsg, strconv.FormatUint(pkt.PacketNo, 10), from)
 	}
 	peer := Peer{Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port}
 	if p, ok := e.peerInfo(peerKey(pkt.Nick, pkt.Host)); ok {
@@ -398,14 +398,14 @@ func (e *Engine) emit(ev Event) {
 	}
 }
 
-// sendPacket 单播一条报文到指定地址。
-func (e *Engine) sendPacket(cmd uint32, extra string, dst *net.UDPAddr) error {
+// sendPacket 单播一条报文到指定地址，返回报文 PacketNo 字符串。
+func (e *Engine) sendPacket(cmd uint32, extra string, dst *net.UDPAddr) (string, error) {
 	if e.conn == nil {
-		return ErrNotStarted
+		return "", ErrNotStarted
 	}
 	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
 	_, err := e.conn.WriteToUDP([]byte(pkt.Encode()), dst)
-	return err
+	return strconv.FormatUint(pkt.PacketNo, 10), err
 }
 
 // broadcastPacket 广播一条报文到所有网段。
@@ -425,15 +425,16 @@ func (e *Engine) nextPacketNo() uint64 {
 	return e.packetNo.Add(1)
 }
 
-// SendText 向指定地址发送文本消息（单播，要求回执；对方确认后
-// EventReceipt 会带回本次报文的 PacketNo 字符串）。
+// SendText 向指定地址发送文本消息（单播，要求回执），返回报文 PacketNo
+// 字符串——UI 以它作为消息 id，receipt 事件据此标记「已送达」。
 // dst 支持 "ip"（端口自动查用户表，未命中用协议端口）与 "ip:port" 两种形式。
-func (e *Engine) SendText(dst, text string) error {
+func (e *Engine) SendText(dst, text string) (string, error) {
 	ip, port, err := e.resolveAddr(dst)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return e.sendPacket(CmdSendMsg|OptSendCheck, text, &net.UDPAddr{IP: ip, Port: port})
+	msgID, err := e.sendPacket(CmdSendMsg|OptSendCheck, text, &net.UDPAddr{IP: ip, Port: port})
+	return msgID, err
 }
 
 // resolveAddr 解析目标地址：显式 "ip:port" 直用；纯 "ip" 时优先取用户表中

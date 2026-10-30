@@ -20,6 +20,7 @@ import {
   Info,
   Search,
   ArrowLeft,
+  CircleAlert,
 } from 'lucide-react';
 import { ChatMessage, Contact } from '../types';
 import { STATUS_COLORS, STATUS_LABELS } from '../data/mockData';
@@ -396,6 +397,21 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                     }`}
                   >
                     {m.text}
+                  </div>
+                )}
+
+                {/* 发送失败行内提示（T-M2-4）：气泡下红字，标注原因 */}
+                {m.t === 'me' && m.delivered === false && (
+                  <div className="text-[11px] text-[var(--danger)] mt-1 flex items-center gap-1 justify-end">
+                    <CircleAlert className="w-3 h-3" />
+                    {m.name || '发送失败，对方可能已离线'}
+                  </div>
+                )}
+                {/* 已送达标记（receipt 事件命中后显示） */}
+                {m.t === 'me' && m.delivered === true && (
+                  <div className="text-[10px] text-[var(--mut)] mt-0.5 flex items-center gap-0.5 justify-end">
+                    <Check className="w-3 h-3" />
+                    已送达
                   </div>
                 )}
 

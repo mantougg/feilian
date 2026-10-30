@@ -45,6 +45,8 @@ import {
   closeWindow,
   getPeers,
   getSelf,
+  sendText,
+  broadcastText,
   type EngineEvent,
 } from './lib/wailsBridge';
 import { useEngineEvents } from './hooks/useEngineEvents';
@@ -244,9 +246,11 @@ export default function App() {
     setMobilePane('chat');
   };
 
-  // Send message（发送链路 T-M2-4 接引擎；此处先本地呈现）
-  const handleSendMessage = (text: string) => {
+  // Send message（T-M2-4 发送链路）：本地先出气泡，引擎返回 msgID 回填，
+  // receipt 事件命中后标「已送达」；发送失败（离线/引擎未启动）行内标红。
+  const handleSendMessage = async (text: string) => {
     const targetId = activeConvId;
+    if (!targetId) return;
     const currentTime = formatCurrentTime();
     const newMsgId = `m_${Date.now()}`;
 
@@ -276,6 +280,56 @@ export default function App() {
         unread: 0,
       },
     }));
+
+    // 广播会话走 BroadcastText（无回执）；单聊走 SendText（要求回执）
+    const contact = contacts[targetId];
+    if (contact?.isBroadcast) {
+      try {
+        await broadcastText(text);
+      } catch {
+        markMessage(newMsgId, '发送失败：引擎未启动');
+      }
+      return;
+    }
+    try {
+      const msgId = await sendText(contact?.ip || targetId, text);
+      // msgID 即回执关联凭据；浏览器形态返回空串则无回执
+      if (msgId) {
+        rekeyMessage(newMsgId, msgId);
+      }
+    } catch (err) {
+      markMessage(newMsgId, `发送失败：${err instanceof Error ? err.message : '对方可能已离线'}`);
+    }
+  };
+
+  /** 把消息 id 换成报文 PacketNo（receipt 事件按它匹配）。 */
+  const rekeyMessage = (oldId: string, msgId: string) => {
+    setConversations((prev) => {
+      for (const [cid, list] of Object.entries(prev)) {
+        const idx = list.findIndex((m) => m.id === oldId);
+        if (idx >= 0) {
+          const nl = [...list];
+          nl[idx] = { ...nl[idx], id: msgId };
+          return { ...prev, [cid]: nl };
+        }
+      }
+      return prev;
+    });
+  };
+
+  /** 标记某条我方消息发送失败（行内提示）。 */
+  const markMessage = (msgId: string, reason: string) => {
+    setConversations((prev) => {
+      for (const [cid, list] of Object.entries(prev)) {
+        const idx = list.findIndex((m) => m.id === msgId);
+        if (idx >= 0) {
+          const nl = [...list];
+          nl[idx] = { ...nl[idx], delivered: false, name: reason };
+          return { ...prev, [cid]: nl };
+        }
+      }
+      return prev;
+    });
   };
 
   // Send file card

@@ -31,13 +31,13 @@
 **验收**：新消息 → 未读+置顶+预览更新；打开会话清零。✅（新逻辑集中在 `applyIncomingMessage` 纯函数：追加气泡（清 typing 残留）+置顶+未读（会话打开时清零）+时间预览；16 个前端单测全过。打开清零在 handleSelectConv）
 **依赖**：T-M2-2。
 
-## T-M2-4 发送链路 ⬜ <a id="T-M2-4"></a>
+## T-M2-4 发送链路 ✅ <a id="T-M2-4"></a>
 
-- [ ] `handleSendMessage` → `SendText`
-- [ ] 回执（receipt 事件）更新消息状态
-- [ ] 失败（离线）行内提示
+- [x] `handleSendMessage` → `SendText`
+- [x] 回执（receipt 事件）更新消息状态
+- [x] 失败（离线）行内提示
 
-**验收**：双开 exe 互发消息全链路 OK。
+**验收**：双开 exe 互发消息全链路 OK。✅（发送：本地先出气泡 → SendText 返回 PacketNo 回填消息 id → receipt 命中标「已送达」；失败在气泡下红字标注原因；广播会话走 BroadcastText 无回执。engine.SendText 签名改为返回 (msgID, error)。引擎收发/回执链路单测 6 项全过，wails build 通过；**待用户验证**：双开 exe 界面互发需人工确认）
 **依赖**：T-M2-3。**落点**：`frontend/src/App.tsx` / `components/ChatPanel.tsx`。
 
 ## T-M2-5 正在输入 ⬜ <a id="T-M2-5"></a>

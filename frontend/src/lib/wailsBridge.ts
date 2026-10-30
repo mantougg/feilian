@@ -29,7 +29,7 @@ interface WailsHost {
         ToggleMaximize?: () => void;
         CloseWindow?: () => void;
         GetPeers?: () => Promise<EngineEvent['peer'][]>;
-        SendText?: (ip: string, text: string) => Promise<void>;
+        SendText?: (ip: string, text: string) => Promise<string>;
         BroadcastText?: (text: string) => Promise<void>;
         GetSelf?: () => Promise<SelfInfo>;
         SetSelf?: (nick: string, dept: string, status: string) => Promise<void>;
@@ -91,10 +91,9 @@ export async function setSelf(nick: string, dept: string, status: string): Promi
   await host().go?.main?.App?.SetSelf?.(nick, dept, status);
 }
 
-/** 返回报文序号（回执关联用）；浏览器形态返回空串。 */
+/** 返回报文序号（回执关联用）；浏览器形态返回空串（无回执）。 */
 export async function sendText(ip: string, text: string): Promise<string> {
-  await host().go?.main?.App?.SendText?.(ip, text);
-  return '';
+  return (await host().go?.main?.App?.SendText?.(ip, text)) ?? '';
 }
 
 export async function broadcastText(text: string): Promise<void> {

@@ -102,10 +102,10 @@ func TestSendText(t *testing.T) {
 	e := New(Config{Nick: "我", Hostname: "PC-ME", Port: cAddr.Port}, make(chan Event, 8))
 	attachConn(t, e, make(chan Event, 8))
 
-	if err := e.SendText("127.0.0.1", "你好，飞联 🚀"); err != nil {
+	if _, err := e.SendText("127.0.0.1", "你好，飞联 🚀"); err != nil {
 		t.Fatalf("SendText: %v", err)
 	}
-	if err := e.SendText("not-an-ip", "x"); err == nil {
+	if _, err := e.SendText("not-an-ip", "x"); err == nil {
 		t.Fatalf("无效 IP 应报错")
 	}
 
@@ -153,7 +153,7 @@ func TestSendTextExplicitPort(t *testing.T) {
 	attachConn(t, e, make(chan Event, 8)) // 引擎绑随机端口，cfg.Port 保持 2425
 
 	dst := fmt.Sprintf("127.0.0.1:%d", cAddr.Port)
-	if err := e.SendText(dst, "定向联调消息"); err != nil {
+	if _, err := e.SendText(dst, "定向联调消息"); err != nil {
 		t.Fatalf("SendText: %v", err)
 	}
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))
