@@ -125,10 +125,20 @@ export default function App() {
 
   // ---- 引擎事件处理（T-M2-2/T-M2-3）----
 
-  // peer 上线/资料变更：upsert 联系人（保留旧字段，如签名等 UI 侧数据）
+  // peer 上线/资料变更：upsert 联系人（保留旧字段，如签名等 UI 侧数据）；
+  // 同 IP 的飞秋占位条目（登录名@IP）在真昵称入库后顺手清理
   const handlePeerPresence = (ev: EngineEvent) => {
     const c = peerToContact(ev.peer);
-    setContacts((prev) => ({ ...prev, [c.id]: { ...(prev[c.id] || {}), ...c } }));
+    setContacts((prev) => {
+      const next = { ...prev };
+      for (const [id, old] of Object.entries(next)) {
+        if (id !== c.id && old.ip === c.ip && !old.isSelf && !old.isBroadcast) {
+          delete next[id];
+        }
+      }
+      next[c.id] = { ...(next[c.id] || {}), ...c };
+      return next;
+    });
   };
 
   // peer 下线：仅标记离线（保留在列表，飞秋语义：离线用户仍可见）

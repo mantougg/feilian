@@ -111,6 +111,8 @@ type Engine struct {
 	packetNo   atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
 	peers      map[string]Peer
 	peersMu    sync.RWMutex
+	queried    map[string]bool // 已单播查询过真昵称的飞秋占位 IP（去重）
+	queryMu    sync.Mutex
 	tserver    *transfer.Server
 	tlim       transfer.Limiter
 	xfersMu    sync.Mutex
@@ -131,7 +133,7 @@ func New(cfg Config, events chan Event) *Engine {
 	if cfg.Status == "" {
 		cfg.Status = StatusOnline
 	}
-	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest)}
+	e := &Engine{cfg: cfg, out: events, quit: make(chan struct{}), peers: make(map[string]Peer), queried: make(map[string]bool), xfers: make(map[string]*xferTask), pending: make(map[string]fileRequest)}
 	return e
 }
 
@@ -385,7 +387,7 @@ func (e *Engine) readLoop() {
 		if !ok {
 			// 飞秋私有格式（1_lbt 前缀）：只做发现与保活，不进标准解析
 			if fq, fok := ParseFeiqNative(string(buf[:n])); fok {
-				e.handleFeiqNative(fq, from)
+				e.handleFeiqNative(fq, string(buf[:n]), from)
 				continue
 			}
 			e.noteUnparsed(buf[:n], from)
@@ -405,26 +407,58 @@ func (e *Engine) readLoop() {
 // 证明在线，建档并刷新 LastSeen。该格式不携带主机名，以源 IP 充当 host
 // （用户表主键因此可区分多台登录名相同的机器）；部门标「飞秋」便于识别。
 // 私有命令语义的深度互通（真昵称/消息收发）属 T-M1-7 范畴。
-func (e *Engine) handleFeiqNative(fq FeiqNative, from *net.UDPAddr) {
+func (e *Engine) handleFeiqNative(fq FeiqNative, raw string, from *net.UDPAddr) {
 	nick := DecodeExtra(fq.Nick)
 	if nick == "" {
 		return
 	}
 	key := peerKey(nick, from.IP.String())
+	e.peersMu.Lock()
+	// 同 IP 已存在真实资料记录（真昵称升级完成）：只刷新其 LastSeen，
+	// 不再重建占位，否则心跳会把它打回「登录名@IP」反复横跳
+	for k, rp := range e.peers {
+		if rp.IP == from.IP.String() && rp.Host != rp.IP {
+			rp.LastSeen = time.Now()
+			e.peers[k] = rp
+			e.peersMu.Unlock()
+			return
+		}
+	}
+	old, existed := e.peers[key]
 	p := Peer{
 		Nick: nick, Host: from.IP.String(), IP: from.IP.String(), Port: from.Port,
 		Dept: "飞秋", Status: StatusOnline, LastSeen: time.Now(),
 	}
-	e.peersMu.Lock()
-	old, existed := e.peers[key]
 	if existed {
 		p.Dept, p.Status = old.Dept, old.Status
 	}
 	e.peers[key] = p
 	e.peersMu.Unlock()
 	if !existed {
+		// 首包完整落日志（诊断样例仅 64B，逆向私有格式需完整布局）
+		sample := raw
+		if len(sample) > 256 {
+			sample = sample[:256]
+		}
+		log.Printf("飞秋首包 from %s (%d B): %x", from, len(raw), sample)
 		e.emit(Event{Type: EventPeerOnline, Peer: p, Time: time.Now()})
+		go e.queryRealNick(from) // 占位昵称是登录名，主动查真昵称
 	}
+}
+
+// queryRealNick 向飞秋占位联系人单播一条标准 IPMsg BrEntry（每 IP 一次）：
+// 飞秋兼容标准协议，应答 AnsEntry 携带自定义昵称与主机名，
+// upsertPresence 据此把「登录名@IP」占位记录升级为真实资料。
+func (e *Engine) queryRealNick(from *net.UDPAddr) {
+	time.Sleep(500 * time.Millisecond) // 让 peer_online 先行，且避开对方突发
+	e.queryMu.Lock()
+	if e.queried[from.IP.String()] {
+		e.queryMu.Unlock()
+		return
+	}
+	e.queried[from.IP.String()] = true
+	e.queryMu.Unlock()
+	_, _ = e.sendPacket(CmdBrEntry, e.presenceJSON(), from)
 }
 
 // noteUnparsed 记录解析失败报文：计数 + 环形缓冲最近 8 条（时间/源地址/
@@ -585,6 +619,8 @@ func parsePresence(extra string) presenceExtra {
 
 // upsertPresence 处理 Entry/AnsEntry：新增用户推 peer_online，
 // 已知用户部门/状态变化推 peer_update，其余只刷新 LastSeen。
+// 同 IP 存在飞秋占位记录（登录名@IP）时静默替换并推其 offline——
+// 真昵称应答入库后，占位条目随之升级消失（dept 为空则继承「飞秋」标注）。
 func (e *Engine) upsertPresence(pkt Packet, from *net.UDPAddr) {
 	px := parsePresence(pkt.Extra)
 	// Status 兜底 online：解析失败或对端未携带时按在线处理
@@ -595,13 +631,37 @@ func (e *Engine) upsertPresence(pkt Packet, from *net.UDPAddr) {
 	now := time.Now()
 
 	e.peersMu.Lock()
+	var displaced []Peer
+	for k, p := range e.peers {
+		// 占位记录特征：host 用 IP 充当（== ip）；真记录的主机名不会等于 IP
+		if k != key && p.Host == p.IP && p.IP == from.IP.String() {
+			delete(e.peers, k)
+			displaced = append(displaced, p)
+		}
+	}
+	if px.Dept == "" {
+		// 空部门不清空已有标注（飞秋非 JSON extra、handlePacket 的
+		// ensurePeer+分支双调 upsertPresence 都依赖此语义）
+		for _, d := range displaced {
+			if d.Dept != "" {
+				px.Dept = d.Dept
+				break
+			}
+		}
+	}
 	old, existed := e.peers[key]
+	if px.Dept == "" && existed {
+		px.Dept = old.Dept
+	}
 	e.peers[key] = Peer{
 		Nick: pkt.Nick, Host: pkt.Host, IP: from.IP.String(), Port: from.Port,
 		Dept: px.Dept, Status: px.Status, LastSeen: now,
 	}
 	e.peersMu.Unlock()
 
+	for _, d := range displaced {
+		e.emit(Event{Type: EventPeerOffline, Peer: d, Time: now})
+	}
 	if !existed {
 		e.emit(Event{Type: EventPeerOnline, Peer: e.peersSnapshotOf(key), Time: now})
 		return
