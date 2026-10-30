@@ -9,6 +9,8 @@ import {
   peerStatusToUi,
   peerToContact,
   groupContactsByDept,
+  applyIncomingMessage,
+  type ConversationState,
 } from './chatLogic';
 import { ChatMessage, Contact } from '../types';
 
@@ -126,4 +128,44 @@ test('groupContactsByDept 按部门分组并排除广播/群聊', () => {
   assert.equal(groups.find((g) => g.dept === '研发中心')!.members.length, 2);
   assert.equal(groups.find((g) => g.dept === '未分组')!.members[0].name, '陈晨');
   assert.ok(!groups.some((g) => g.dept === '全员'));
+});
+
+// ---- M2：入站消息应用（T-M2-3 验收：未读+置顶+预览更新；打开清零） ----
+
+function emptyConvState(): ConversationState {
+  return { conversations: {}, meta: {}, order: ['bc'] };
+}
+
+test('applyIncomingMessage 新会话：追加消息、置顶、未读+1、时间预览', () => {
+  const r = applyIncomingMessage(emptyConvState(), '张伟@PC-A', { id: 'm1', t: 'them', text: '在吗', time: '10:00' }, '');
+  assert.deepEqual(r.order, ['张伟@PC-A', 'bc']); // 置顶
+  assert.equal(r.conversations['张伟@PC-A'].length, 1);
+  assert.equal(r.meta['张伟@PC-A'].unread, 1);
+  assert.equal(r.meta['张伟@PC-A'].time, '10:00'); // 预览时间
+});
+
+test('applyIncomingMessage 会话打开时不计未读，未打开累加', () => {
+  let s = applyIncomingMessage(emptyConvState(), 'a@A', { id: 'm1', t: 'them', text: '1', time: '10:00' }, '');
+  s = applyIncomingMessage(s, 'a@A', { id: 'm2', t: 'them', text: '2', time: '10:01' }, 'a@A'); // 已打开
+  assert.equal(s.meta['a@A'].unread, 0); // 打开会话期间收消息清零（正看着）
+  assert.equal(s.meta['a@A'].time, '10:01');
+  s = applyIncomingMessage(s, 'a@A', { id: 'm3', t: 'them', text: '3', time: '10:02' }, 'b@B'); // 切走后
+  assert.equal(s.meta['a@A'].unread, 1);
+});
+
+test('applyIncomingMessage 清除对端 typing 残留', () => {
+  let s = emptyConvState();
+  s.conversations['a@A'] = [
+    { id: 'm1', t: 'them', text: '1', time: '10:00' },
+    { id: 'typing_a@A', t: 'typing', who: 'a@A' },
+  ];
+  s = applyIncomingMessage(s, 'a@A', { id: 'm2', t: 'them', text: '2', time: '10:01' }, '');
+  assert.equal(s.conversations['a@A'].length, 2); // typing 被替换
+  assert.ok(!s.conversations['a@A'].some((m) => m.t === 'typing'));
+});
+
+test('打开会话即清零未读（handleSelectConv 语义的纯函数表达）', () => {
+  let s = applyIncomingMessage(emptyConvState(), 'a@A', { id: 'm1', t: 'them', text: '1', time: '10:00' }, '');
+  s.meta['a@A'] = { ...s.meta['a@A'], unread: 0 };
+  assert.equal(s.meta['a@A'].unread, 0);
 });

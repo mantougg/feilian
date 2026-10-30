@@ -23,12 +23,12 @@
 **验收**：上线/下线实时反映在联系人与会话列表。✅（六类事件全部接入：presence upsert 联系人、offline 标离线保留列表、message 走 applyIncomingMessage 纯函数、typing 指示 5s 自消、receipt 按 msgId 标送达。浏览器形态订阅降级 no-op。**待用户验证**：双开 exe 的实时性需人工确认，引擎侧事件流已由 M1 单测覆盖）
 **依赖**：T-M1-5。**落点**：`frontend/src/hooks/useEngineEvents.ts`。
 
-## T-M2-3 会话状态真实化 ⬜ <a id="T-M2-3"></a>
+## T-M2-3 会话状态真实化 ✅ <a id="T-M2-3"></a>
 
-- [ ] 保留 `frontend/src/utils/chatLogic.ts`（置顶/未读计算已有单测）
-- [ ] 删除自动回复模拟逻辑
+- [x] 保留 `frontend/src/utils/chatLogic.ts`（置顶/未读计算已有单测）
+- [x] 删除自动回复模拟逻辑（随 T-M2-1 mock 退场完成）
 
-**验收**：新消息 → 未读+置顶+预览更新；打开会话清零。
+**验收**：新消息 → 未读+置顶+预览更新；打开会话清零。✅（新逻辑集中在 `applyIncomingMessage` 纯函数：追加气泡（清 typing 残留）+置顶+未读（会话打开时清零）+时间预览；16 个前端单测全过。打开清零在 handleSelectConv）
 **依赖**：T-M2-2。
 
 ## T-M2-4 发送链路 ⬜ <a id="T-M2-4"></a>
