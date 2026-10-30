@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   Users,
@@ -18,6 +18,7 @@ import {
 } from '../types';
 import { STATUS_COLORS, STATUS_LABELS } from '../data/mockData';
 import { getConversationPreview, groupContactsByDept } from '../utils/chatLogic';
+import { getEngineStats, EngineStats } from '../lib/wailsBridge';
 
 interface MiddleColumnProps {
   activeView: ActiveView;
@@ -57,6 +58,23 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
   onSelectSettingsPage,
   selfUser,
 }) => {
+  // 引擎自诊断轮询（10s）：空态展示监听端口与收发包数，
+  // 用户无需工具即可判断「收不到任何包」还是「收到但无对端」
+  const [stats, setStats] = useState<EngineStats | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const pull = async () => {
+      const s = await getEngineStats();
+      if (alive) setStats(s);
+    };
+    pull();
+    const timer = window.setInterval(pull, 10000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   // Render status badge dot
   const renderStatusDot = (status: string) => {
     if (status === 'off' || status === 'grp' || status === 'bc') return null;
@@ -312,13 +330,25 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                   正在探测局域网在线同事…
                   <br />
                   本机 IP：<span className="tabular-nums">{selfUser.ip || '获取中'}</span>
-                  <br />
-                  <span className="mt-1 block text-[10px] leading-relaxed opacity-80">
-                    若长时间无人出现：放行 Windows 防火墙入站
-                    <br />
-                    UDP/TCP 2425（首次运行时的弹窗请选「允许」）
-                  </span>
                 </p>
+                {stats && stats.started ? (
+                  <p className="mt-2 text-[10px] leading-relaxed text-[var(--mut)] tabular-nums">
+                    引擎 UDP:{stats.listenPort}
+                    {stats.listenPort !== 2425 && '（标准端口被占已避让）'}
+                    <br />
+                    已收 {stats.rxPackets} 包 / 已发 {stats.txPackets} 包
+                  </p>
+                ) : (
+                  <p className="mt-2 text-[10px] leading-relaxed text-[var(--danger)]">
+                    网络引擎未启动（UDP 2425 附近端口均被占用）
+                  </p>
+                )}
+                {stats && stats.started && stats.rxPackets === 0 && (
+                  <p className="mt-2 text-[10px] leading-relaxed opacity-80 text-[var(--mut)]">
+                    长时间 0 收包：请放行防火墙入站 UDP 2425；
+                    若与飞秋同机运行属正常（新版已自动避让端口）
+                  </p>
+                )}
               </div>
             )}
           </div>

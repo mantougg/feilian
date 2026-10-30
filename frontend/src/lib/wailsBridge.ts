@@ -42,6 +42,7 @@ interface WailsHost {
         ToggleMaximize?: () => void;
         CloseWindow?: () => void;
         GetPeers?: () => Promise<EngineEvent['peer'][]>;
+        EngineStats?: () => Promise<EngineStats>;
         SendText?: (ip: string, text: string) => Promise<string>;
         SendTyping?: (ip: string) => Promise<void>;
         BroadcastText?: (text: string) => Promise<void>;
@@ -91,6 +92,27 @@ export function closeWindow(): void {
 
 export async function getPeers(): Promise<EngineEvent['peer'][]> {
   return (await host().go?.main?.App?.GetPeers?.()) ?? [];
+}
+
+export interface EngineStats {
+  started: boolean;
+  listenPort: number;
+  rxPackets: number;
+  txPackets: number;
+  peers: number;
+}
+
+/** 引擎自诊断（监听端口/收发包数）；浏览器形态返回未启动的空态。 */
+export async function getEngineStats(): Promise<EngineStats> {
+  return (
+    (await host().go?.main?.App?.EngineStats?.()) ?? {
+      started: false,
+      listenPort: 0,
+      rxPackets: 0,
+      txPackets: 0,
+      peers: 0,
+    }
+  );
 }
 
 export interface SelfInfo {

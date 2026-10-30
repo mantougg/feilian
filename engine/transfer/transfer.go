@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -103,11 +104,21 @@ type Server struct {
 }
 
 // NewServer 监听 port 并开始服务；lim 为 nil 不限速。
+// port 为 0 时由系统分配随机端口（net 惯例）；DefaultPort 由调用方显式传入，
+// 在这里兜底会把本想随机端口的调用方（测试）静默拽到 2425，与其他实例打架。
 func NewServer(port int, lim Limiter) (*Server, error) {
-	if port == 0 {
-		port = DefaultPort
-	}
-	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
+	// SO_REUSEADDR：进程重启后立刻重绑会撞上一进程的 TIME_WAIT，
+	// 不设置则文件通道静默缺失（UDP 侧成功、TCP 侧起不来）
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if cerr := c.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+		}); cerr != nil {
+			return cerr
+		}
+		return serr
+	}}
+	ln, err := lc.Listen(context.Background(), "tcp4", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("transfer: 监听 TCP %d: %w", port, err)
 	}
@@ -287,6 +298,11 @@ func Fetch(ctx context.Context, addr string, fileID uint32, dst io.Writer, lim L
 			total += int64(n)
 		}
 		if rerr == io.EOF {
+			if total == 0 {
+				// 连接建立即被对端关闭（fileID 未注册 / 连接撞残留状态），
+				// 不得当成功，否则上层落盘空文件还报「传输完成」
+				return 0, fmt.Errorf("transfer: %s 未返回任何数据（fileID=%d 可能未注册）", addr, fileID)
+			}
 			return total, nil
 		}
 		if rerr != nil {

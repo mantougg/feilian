@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { MessageSquare, CircleAlert, X } from 'lucide-react';
+import { MessageSquare, CircleAlert, Info, X } from 'lucide-react';
 import { TitleBar } from './components/TitleBar';
 import { NavRail } from './components/NavRail';
 import { MiddleColumn } from './components/MiddleColumn';
@@ -266,8 +266,17 @@ export default function App() {
     if (ev.text) setEngineError(ev.text);
   };
 
+  // 引擎提示（如端口被占自动避让）：蓝色横幅，20 秒自动消失
+  const [engineNotice, setEngineNotice] = useState<string>('');
+  const handleEngineNotice = (ev: EngineEvent) => {
+    if (!ev.text) return;
+    setEngineNotice(ev.text);
+    window.setTimeout(() => setEngineNotice(''), 20000);
+  };
+
   useEngineEvents({
     error: handleEngineError,
+    notice: handleEngineNotice,
     peer_online: handlePeerPresence,
     peer_update: handlePeerPresence,
     peer_offline: handlePeerOffline,
@@ -536,6 +545,17 @@ export default function App() {
             <CircleAlert className="w-3.5 h-3.5 flex-none" />
             <span className="flex-1 truncate" title={engineError}>{engineError}</span>
             <button type="button" onClick={() => setEngineError('')} className="p-0.5 hover:opacity-70 cursor-pointer flex-none" aria-label="关闭错误提示">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* 引擎提示横幅（端口避让等）：可关闭，20 秒自动消失 */}
+        {!engineError && engineNotice && (
+          <div className="flex items-center gap-2 px-4 py-1.5 bg-[var(--acc)]/10 border-b border-[var(--acc)]/30 text-[var(--acc)] text-xs" role="status">
+            <Info className="w-3.5 h-3.5 flex-none" />
+            <span className="flex-1 truncate" title={engineNotice}>{engineNotice}</span>
+            <button type="button" onClick={() => setEngineNotice('')} className="p-0.5 hover:opacity-70 cursor-pointer flex-none" aria-label="关闭提示">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>

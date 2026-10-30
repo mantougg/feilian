@@ -27,7 +27,9 @@ func attachConn(t *testing.T, e *Engine, ch chan Event) {
 		t.Fatalf("引擎 socket: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	e.conn, e.bcast = conn, bcast
+	e.conn.Store(conn)
+	e.listenPort.Store(int32(conn.LocalAddr().(*net.UDPAddr).Port))
+	e.bcast = bcast
 }
 
 // 验收：收到 CmdSendMsg|OptSendCheck 即回 CmdRecvMsg（extra=原 PacketNo），
@@ -173,10 +175,8 @@ func TestBroadcastText(t *testing.T) {
 	e := New(Config{Nick: "我", Hostname: "PC-ME", Port: 0}, make(chan Event, 8))
 	ch := make(chan Event, 8)
 	attachConn(t, e, ch)
-	port := e.conn.LocalAddr().(*net.UDPAddr).Port
-
 	// 对端与引擎同端口双绑（SO_REUSEADDR），广播可投递到两者
-	c, _, err := listenUDP(port)
+	c, _, err := listenUDP(int(e.listenPort.Load()))
 	if err != nil {
 		t.Fatalf("对端同端口绑定: %v", err)
 	}

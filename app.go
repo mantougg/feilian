@@ -357,6 +357,14 @@ func (a *App) GetPeers() []engine.Peer {
 	return a.engine.Peers()
 }
 
+// EngineStats 引擎自诊断（监听端口/收发包数/在线数），空态排查入站链路用。
+func (a *App) EngineStats() engine.Stats {
+	if a.engine == nil {
+		return engine.Stats{}
+	}
+	return a.engine.Stats()
+}
+
 // SendText 向指定 IP 发送文本消息，返回报文 PacketNo 字符串（回执关联用）。
 func (a *App) SendText(ip, text string) (string, error) {
 	if a.engine == nil {

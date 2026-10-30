@@ -35,7 +35,17 @@ const (
 	EventFileProgress = "file_progress" // 传输进度
 	EventFileDone     = "file_done"     // 传输完成
 	EventEngineError  = "error"         // 引擎错误（发往 UI 提示）
+	EventNotice       = "notice"        // 引擎提示（如端口避让，UI 非阻断告知）
 )
+
+// Stats 引擎自诊断快照（UI 空态排查入站链路用）。
+type Stats struct {
+	Started    bool   `json:"started"`    // 引擎是否已启动
+	ListenPort int    `json:"listenPort"` // 实际监听端口（避让后 != 2425）
+	RxPackets  uint64 `json:"rxPackets"`  // 收到的 UDP 报文数（含本机回环）
+	TxPackets  uint64 `json:"txPackets"`  // 发出的报文调用数
+	Peers      int    `json:"peers"`      // 当前在线用户数
+}
 
 // Peer 描述局域网内的一个其他用户。
 type Peer struct {
@@ -78,16 +88,21 @@ type Engine struct {
 	out      chan Event
 	quit     chan struct{}
 	once     sync.Once
-	conn     *net.UDPConn  // UDP 套接字（Start 建立，Stop 关闭）
-	bcast    []net.IP      // 各网段定向广播地址，广播时逐个发送
-	packetNo atomic.Uint64 // 出站报文序号（回执匹配的唯一凭据）
-	peers    map[string]Peer
-	peersMu  sync.RWMutex
-	tserver  *transfer.Server
-	tlim     transfer.Limiter
-	xfersMu  sync.Mutex
-	xfers    map[string]*xferTask   // 传输任务表，键 = 请求报文 PacketNo 字符串
-	pending  map[string]fileRequest // 待接受的文件请求（键 = 请求报文 PacketNo）
+	// conn/listenPort 用原子量：看门狗 rebind 与收发路径并发访问
+	conn       atomic.Pointer[net.UDPConn] // UDP 套接字（Start 建立，Stop 关闭）
+	listenPort atomic.Int32                // 实际监听端口（标准端口被占时避让）
+	rebound    atomic.Bool                 // 看门狗已执行过一次避让（只兜一次）
+	rxPackets  atomic.Uint64               // 收包计数（自诊断）
+	txPackets  atomic.Uint64               // 发包计数（自诊断）
+	bcast      []net.IP                    // 各网段定向广播地址，广播时逐个发送
+	packetNo   atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
+	peers      map[string]Peer
+	peersMu    sync.RWMutex
+	tserver    *transfer.Server
+	tlim       transfer.Limiter
+	xfersMu    sync.Mutex
+	xfers      map[string]*xferTask   // 传输任务表，键 = 请求报文 PacketNo 字符串
+	pending    map[string]fileRequest // 待接受的文件请求（键 = 请求报文 PacketNo）
 }
 
 // xferTask 一次接收任务（可含多文件）的取消句柄。
@@ -151,24 +166,117 @@ const (
 	sweepInterval     = 15 * time.Second      // 超时清扫周期
 )
 
-// Start 启动引擎：建立 UDP 套接字、进入读循环并广播上线，立即返回。
+// Start 启动引擎：探测端口占用并避让、建立 UDP 套接字、进入读循环并广播上线，立即返回。
 func (e *Engine) Start() error {
-	conn, bcast, err := listenUDP(e.cfg.Port)
+	// 标准/指定端口被其他程序（同机飞秋/飞鸽）占用时，Windows 下 SO_REUSEADDR
+	// 绑定仍会"成功"，但入站报文全部投递给先绑定者——必须主动避让到空闲端口，
+	// 再靠广播里的双端口集合与非标准端口向 2425 补发机制保持互通
+	port, err := acquirePort(e.cfg.Port, 10)
 	if err != nil {
-		return fmt.Errorf("engine: 监听 UDP %d 失败: %w", e.cfg.Port, err)
+		return fmt.Errorf("engine: 监听 UDP %d 附近无可用端口: %w", e.cfg.Port, err)
 	}
-	e.conn, e.bcast = conn, bcast
+	conn, bcast, err := listenUDP(port)
+	if err != nil {
+		return fmt.Errorf("engine: 监听 UDP %d 失败: %w", port, err)
+	}
+	e.conn.Store(conn)
+	e.listenPort.Store(int32(port))
+	e.bcast = bcast
 
-	go e.readLoop()
-	go e.sweepLoop()
-	// TCP 文件通道（M3）：失败不阻断 UDP 主链路，仅丢文件能力
-	if ts, err := transfer.NewServer(e.cfg.Port, e.tlim); err == nil {
+	// TCP 文件通道（M3）：失败不阻断 UDP 主链路，仅丢文件能力；
+	// 与 UDP 同号，接收侧按 UDP 源端口推导 TCP 地址才成立
+	if ts, terr := transfer.NewServer(port, e.tlim); terr == nil {
 		e.tserver = ts
 	}
+	go e.readLoop()
+	go e.sweepLoop()
+	go e.watchdogLoop()
 	e.broadcastPresence(CmdBrEntry)
 	go e.heartbeatLoop()
+	if port != e.cfg.Port {
+		e.emit(Event{
+			Type: EventNotice,
+			Text: fmt.Sprintf("UDP %d 已被其他程序占用（可能与飞秋/飞鸽同机运行），已自动改用端口 %d；与飞秋仍可互通，发现新上线用户最多延迟约 30 秒", e.cfg.Port, port),
+			Time: time.Now(),
+		})
+	}
 
 	return nil
+}
+
+// acquirePort 从 prefer 起依次用「不带 SO_REUSEADDR」的裸绑定探测占用，
+// 返回第一个真正空闲的端口（探测即关）；连试 tries 个都被占则报错。
+// 真实监听走 listenUDP（带 REUSEADDR），这里只负责判定谁先占着端口。
+func acquirePort(prefer, tries int) (int, error) {
+	for i := 0; i < tries; i++ {
+		p := prefer + i
+		c, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", p))
+		if err == nil {
+			_ = c.Close()
+			return p, nil
+		}
+	}
+	return 0, fmt.Errorf("UDP %d-%d 均被占用", prefer, prefer+tries-1)
+}
+
+// watchdogLoop 启动初期兜底：避让探测存在误判可能（占用方绑定了特定地址等），
+// 若标准端口上 8 秒内一个报文都没收到，视为端口实际被抢，自动换端口重绑。
+// 局域网无人在线的空旷网络同样零收包，误触发一次避让也无功能损失，故不再二次重试。
+func (e *Engine) watchdogLoop() {
+	select {
+	case <-e.quit:
+		return
+	case <-time.After(8 * time.Second):
+	}
+	if e.rebound.Load() || int(e.listenPort.Load()) != e.cfg.Port || e.rxPackets.Load() > 0 {
+		return
+	}
+	select {
+	case <-e.quit:
+		return
+	default:
+	}
+	port, err := acquirePort(e.cfg.Port+1, 10)
+	if err != nil {
+		return
+	}
+	if err := e.rebind(port); err != nil {
+		return
+	}
+	e.emit(Event{
+		Type:  EventNotice,
+		Text:  fmt.Sprintf("标准端口 %d 收不到任何报文（疑似被其他软件独占收包），已自动改用端口 %d", e.cfg.Port, port),
+		Time:  time.Now(),
+	})
+}
+
+// rebind 换端口重建 UDP/TCP 监听；旧 readLoop 因旧 conn 关闭自然退出，
+// 新 readLoop 随即接管。仅看门狗在启动初期调用一次，此时传输在途概率可忽略。
+func (e *Engine) rebind(port int) error {
+	conn, bcast, err := listenUDP(port)
+	if err != nil {
+		return err
+	}
+	e.conn.Store(conn)
+	e.listenPort.Store(int32(port))
+	e.bcast = bcast
+	if e.tserver != nil {
+		e.tserver.Close()
+		e.tserver = nil
+	}
+	if ts, terr := transfer.NewServer(port, e.tlim); terr == nil {
+		e.tserver = ts
+	}
+	e.rebound.Store(true)
+	go e.readLoop()
+	e.broadcastPresence(CmdBrEntry)
+	return nil
+}
+
+// Stats 返回引擎自诊断快照（UI 空态展示"收到 N 包"帮助判断入站链路）。
+func (e *Engine) Stats() Stats {
+	s := Stats{Started: e.conn.Load() != nil, ListenPort: int(e.listenPort.Load()), RxPackets: e.rxPackets.Load(), TxPackets: e.txPackets.Load(), Peers: len(e.Peers())}
+	return s
 }
 
 // Stop 停止引擎：先广播 CmdBrExit 下线包，再结束内部循环并关闭套接字。
@@ -176,8 +284,8 @@ func (e *Engine) Stop() {
 	e.once.Do(func() {
 		e.broadcastPresence(CmdBrExit)
 		close(e.quit)
-		if e.conn != nil {
-			e.conn.Close()
+		if c := e.conn.Load(); c != nil {
+			c.Close()
 		}
 		if e.tserver != nil {
 			e.tserver.Close()
@@ -204,7 +312,10 @@ func (e *Engine) broadcastPresence(cmd uint32) {
 	e.broadcastPacket(cmd, extra)
 }
 
-// heartbeatLoop 每 heartbeatInterval 广播一次 CmdNoOperation 维持在线可见。
+// heartbeatLoop 每 heartbeatInterval 广播一次心跳维持在线可见。
+// 避让位实例收不到发往 2425 的全网广播，普通 NoOperation 心跳换不来任何
+// 回包，90s 后会把所有标准端口用户误判离线；改播 CmdBrEntry（IPMsg 语义：
+// 接收方必须回 AnsEntry）借全网应答刷新各用户 LastSeen。
 func (e *Engine) heartbeatLoop() {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -213,7 +324,11 @@ func (e *Engine) heartbeatLoop() {
 		case <-e.quit:
 			return
 		case <-ticker.C:
-			e.broadcastPacket(CmdNoOperation, "")
+			if int(e.listenPort.Load()) != e.cfg.Port {
+				e.broadcastPresence(CmdBrEntry)
+			} else {
+				e.broadcastPacket(CmdNoOperation, "")
+			}
 		}
 	}
 }
@@ -222,13 +337,18 @@ func (e *Engine) heartbeatLoop() {
 func (e *Engine) readLoop() {
 	buf := make([]byte, 4096)
 	for {
-		n, from, err := e.conn.ReadFromUDP(buf)
+		conn := e.conn.Load()
+		if conn == nil {
+			return
+		}
+		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 			continue // 暂时性读错误（如缓冲溢出），不终止循环
 		}
+		e.rxPackets.Add(1)
 		pkt, ok := ParsePacket(string(buf[:n]))
 		if !ok {
 			continue
@@ -465,20 +585,23 @@ func (e *Engine) emit(ev Event) {
 
 // sendPacket 单播一条报文到指定地址，返回报文 PacketNo 字符串。
 func (e *Engine) sendPacket(cmd uint32, extra string, dst *net.UDPAddr) (string, error) {
-	if e.conn == nil {
+	conn := e.conn.Load()
+	if conn == nil {
 		return "", ErrNotStarted
 	}
 	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
-	_, err := e.conn.WriteToUDP([]byte(pkt.Encode()), dst)
+	_, err := conn.WriteToUDP([]byte(pkt.Encode()), dst)
+	e.txPackets.Add(1)
 	return strconv.FormatUint(pkt.PacketNo, 10), err
 }
 
 // broadcastPacket 广播一条报文到所有网段。
 func (e *Engine) broadcastPacket(cmd uint32, extra string) error {
-	if e.conn == nil {
+	if e.conn.Load() == nil {
 		return ErrNotStarted
 	}
 	pkt := Packet{Version: ProtocolVersion, PacketNo: e.nextPacketNo(), Nick: e.cfg.Nick, Host: e.cfg.Hostname, Command: cmd, Extra: extra}
+	e.txPackets.Add(1)
 	return e.broadcast([]byte(pkt.Encode()))
 }
 
@@ -640,33 +763,39 @@ func directedBroadcast(n *net.IPNet) net.IP {
 
 // broadcast 向本机各网段定向广播地址发送报文，并以受限广播
 // 255.255.255.255 兜底覆盖极端网络环境；只返回首个发送失败。
-// 目的端口取「本机协议端口 + 套接字实际绑定端口」去重集合：
-// 标准部署两者同为 2425 发一份；同机联调双开端口号不同时两份都发，
-// 让另一实例能收到广播。
+// 目的端口集合的构成：
+// - 协议端口 cfg.Port 与实际监听端口 lp（标准部署两者相同只发一份）；
+// - CLI 自选非默认端口时补发 DefaultPort，让标准部署实例收到后按源端口回 AnsEntry；
+// - 标准端口被占避让（lp != cfg.Port）时把 cfg.Port+1..+9 一并补发：
+//   同机多个避让实例监听端口互不相同，不补发则彼此看不见
+//   （代价：每轮广播多发几份 <100B 报文，可忽略）。
 func (e *Engine) broadcast(b []byte) error {
-	if e.conn == nil {
+	conn := e.conn.Load()
+	if conn == nil {
 		return ErrNotStarted
 	}
-	ports := []int{e.cfg.Port}
-	if bind := e.conn.LocalAddr().(*net.UDPAddr).Port; bind != e.cfg.Port {
-		ports = append(ports, bind)
-	}
-	// 同机异端口联调约定：非默认端口实例额外向 2425 广播一份——
-	// 默认端口实例收到后按源端口单播 AnsEntry 回来，发现闭环成立
+	lp := int(e.listenPort.Load())
+	ports := []int{e.cfg.Port, lp}
 	if e.cfg.Port != DefaultPort {
 		ports = append(ports, DefaultPort)
+	} else if lp != e.cfg.Port {
+		for p := e.cfg.Port + 1; p < e.cfg.Port+10; p++ {
+			if p != lp {
+				ports = append(ports, p)
+			}
+		}
 	}
 	var firstErr error
 	for _, ip := range e.bcast {
 		for _, port := range ports {
-			if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: ip, Port: port}); err != nil && firstErr == nil {
+			if _, err := conn.WriteToUDP(b, &net.UDPAddr{IP: ip, Port: port}); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
 	// 受限广播兜底，覆盖枚举不到定向广播地址的极端环境
 	for _, port := range ports {
-		if _, err := e.conn.WriteToUDP(b, &net.UDPAddr{IP: net.IPv4bcast, Port: port}); err != nil && firstErr == nil {
+		if _, err := conn.WriteToUDP(b, &net.UDPAddr{IP: net.IPv4bcast, Port: port}); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

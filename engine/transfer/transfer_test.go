@@ -71,7 +71,8 @@ func TestLimiterSlowsTransfer(t *testing.T) {
 	}
 }
 
-// 未知 fileID：服务端静默关闭，Fetch 返回 0 字节且无错误（接收方按大小校验兜底）。
+// 未知 fileID：服务端静默关闭，Fetch 必须报错——
+// 否则上层会把 0 字节当「传输完成」落出空文件。
 func TestFetchUnknownID(t *testing.T) {
 	srv, err := NewServer(0, nil)
 	if err != nil {
@@ -79,8 +80,8 @@ func TestFetchUnknownID(t *testing.T) {
 	}
 	defer srv.Close()
 	n, err := Fetch(context.Background(), fmt.Sprintf("127.0.0.1:%d", srv.Port()), 999, io.Discard, nil)
-	if err != nil || n != 0 {
-		t.Fatalf("n=%d err=%v", n, err)
+	if err == nil || n != 0 {
+		t.Fatalf("n=%d err=%v（未注册 fileID 应报错）", n, err)
 	}
 }
 
