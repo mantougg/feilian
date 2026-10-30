@@ -120,6 +120,7 @@ func (a *App) startEngine() {
 		cfg.Status = engine.StatusOnline
 	}
 	a.engine = engine.New(cfg, events)
+	a.applyLimitRate()
 	if err := a.engine.Start(); err != nil {
 		log.Printf("引擎启动失败: %v", err)
 		return
@@ -163,6 +164,7 @@ func (a *App) recordEvent(ev engine.Event) {
 
 func (a *App) Minimize()       { runtime.WindowMinimise(a.ctx) }
 func (a *App) ToggleMaximize() { runtime.WindowToggleMaximise(a.ctx) }
+
 // CloseWindow 默认隐藏进托盘（T-M4-2），配置 closeToTray=false 时直接退出。
 func (a *App) CloseWindow() {
 	if a.cfgData.CloseToTrayEnabled() {
@@ -275,6 +277,28 @@ func (a *App) CancelTransfer(reqID string) {
 
 // OpenPath 在资源管理器中打开目录/选中文件（「打开文件夹」按钮）。
 func (a *App) OpenPath(path string) error { return execOpen(path) }
+
+// SetLimitRate 设置传输限速档位（"不限速"/"1MB/s"/"512KB/s"），持久化并即时生效。
+func (a *App) SetLimitRate(label string) {
+	a.cfgData.SpeedLimitLabel = label
+	a.applyLimitRate()
+	a.saveConfig()
+}
+
+// applyLimitRate 把档位标签换算为字节/秒并下发引擎。
+func (a *App) applyLimitRate() {
+	if a.engine == nil {
+		return
+	}
+	switch a.cfgData.SpeedLimitLabel {
+	case "1MB/s":
+		a.engine.SetLimitRate(1 << 20)
+	case "512KB/s":
+		a.engine.SetLimitRate(512 << 10)
+	default:
+		a.engine.SetLimitRate(0)
+	}
+}
 
 // GetRecvDir 当前接收目录（设置页展示与修改，T-M4-5 持久化）。
 func (a *App) GetRecvDir() string { return a.recvDir() }

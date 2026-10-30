@@ -55,6 +55,7 @@ interface WailsHost {
         OpenPath?: (path: string) => Promise<void>;
         GetRecvDir?: () => Promise<string>;
         CaptureScreen?: () => Promise<string>;
+        SetLimitRate?: (label: string) => Promise<void>;
         SaveScreenshot?: (pngData: string) => Promise<string>;
       };
     };
@@ -176,4 +177,9 @@ export async function captureScreen(): Promise<string> {
 /** 裁剪产物落盘，返回路径。 */
 export async function saveScreenshot(pngData: string): Promise<string> {
   return (await host().go?.main?.App?.SaveScreenshot?.(pngData)) ?? '';
+}
+
+/** 设置传输限速档位（不限速 | 512KB/s | 1MB/s）。 */
+export async function setLimitRate(label: string): Promise<void> {
+  await host().go?.main?.App?.SetLimitRate?.(label);
 }

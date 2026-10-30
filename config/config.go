@@ -10,18 +10,19 @@ import (
 
 // Data 是配置文件的全部字段（JSON 快照，新增字段向后兼容：零值即默认）。
 type Data struct {
-	Nick          string `json:"nick"`          // 我的昵称
-	Dept          string `json:"dept"`          // 部门
-	Status        string `json:"status"`        // online | busy | away
-	DarkMode      bool   `json:"darkMode"`      // 深色主题
-	SystemNotify  bool   `json:"systemNotify"`  // 系统通知开关
-	RecvDir       string `json:"recvDir"`       // 接收目录
-	OpenAfterDone bool   `json:"openAfterDone"` // 传输完成后自动打开
-	SpeedLimit    int    `json:"speedLimit"`    // 传输限速（字节/秒，0 不限）
-	ScreenshotHot string `json:"screenshotHot"` // 截图热键（展示用，注册见 T-M4-4）
-	SearchHot     string `json:"searchHot"`     // 全局搜索热键
-	AutoLaunch    bool   `json:"autoLaunch"`    // 开机自启动
-	CloseToTray   *bool  `json:"closeToTray"`   // 关闭进托盘（nil/true=是；显式 false 退出）
+	Nick            string `json:"nick"`            // 我的昵称
+	Dept            string `json:"dept"`            // 部门
+	Status          string `json:"status"`          // online | busy | away
+	DarkMode        bool   `json:"darkMode"`        // 深色主题
+	SystemNotify    bool   `json:"systemNotify"`    // 系统通知开关
+	RecvDir         string `json:"recvDir"`         // 接收目录
+	OpenAfterDone   bool   `json:"openAfterDone"`   // 传输完成后自动打开
+	SpeedLimit      int    `json:"speedLimit"`      // 传输限速（字节/秒，0 不限）
+	ScreenshotHot   string `json:"screenshotHot"`   // 截图热键（展示用，注册见 T-M4-4）
+	SearchHot       string `json:"searchHot"`       // 全局搜索热键
+	AutoLaunch      bool   `json:"autoLaunch"`      // 开机自启动
+	CloseToTray     *bool  `json:"closeToTray"`     // 关闭进托盘（nil/true=是；显式 false 退出）
+	SpeedLimitLabel string `json:"speedLimitLabel"` // 限速档位：不限速 | 512KB/s | 1MB/s
 }
 
 // Path 返回配置文件路径：%APPDATA%/feilian/config.json（非 Windows 用 ~/.config）。

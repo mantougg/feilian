@@ -58,6 +58,7 @@ import {
   captureScreen,
   saveScreenshot,
   onEngineEvent,
+  setLimitRate,
   type EngineEvent,
   type FileEntryWire,
 } from './lib/wailsBridge';
@@ -604,7 +605,15 @@ export default function App() {
               <SettingsPanel
                 activePage={activeSettingsPage}
                 settings={settings}
-                onUpdateSettings={setSettings}
+                onUpdateSettings={(updater) => {
+                  setSettings((prev) => {
+                    const next = updater(prev);
+                    if (next.speedLimit !== prev.speedLimit) {
+                      setLimitRate(next.speedLimit).catch(() => undefined);
+                    }
+                    return next;
+                  });
+                }}
                 onToggleTheme={handleToggleTheme}
               />
             )}
