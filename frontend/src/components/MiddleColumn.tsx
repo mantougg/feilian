@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Search,
   Users,
@@ -18,7 +18,7 @@ import {
 } from '../types';
 import { STATUS_COLORS, STATUS_LABELS } from '../data/mockData';
 import { getConversationPreview, groupContactsByDept } from '../utils/chatLogic';
-import { getEngineStats, EngineStats } from '../lib/wailsBridge';
+import { getEngineStats, probePeers, EngineStats } from '../lib/wailsBridge';
 
 interface MiddleColumnProps {
   activeView: ActiveView;
@@ -61,12 +61,14 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
   // 引擎自诊断轮询（10s）：空态展示监听端口与收发包数，
   // 用户无需工具即可判断「收不到任何包」还是「收到但无对端」
   const [stats, setStats] = useState<EngineStats | null>(null);
+  const pullStatsRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     let alive = true;
     const pull = async () => {
       const s = await getEngineStats();
       if (alive) setStats(s);
     };
+    pullStatsRef.current = pull;
     pull();
     const timer = window.setInterval(pull, 10000);
     return () => {
@@ -337,6 +339,12 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                     {stats.listenPort !== 2425 && '（标准端口被占已避让）'}
                     <br />
                     已收 {stats.rxPackets} 包 / 已发 {stats.txPackets} 包
+                    {stats.rxUnparsed > 0 && (
+                      <span title={`hex 样例: ${stats.rawSample || '—'}`}>
+                        <br />
+                        其中 {stats.rxUnparsed} 包无法解析（异构客户端私有格式）
+                      </span>
+                    )}
                   </p>
                 ) : (
                   <p className="mt-2 text-[10px] leading-relaxed text-[var(--danger)]">
@@ -345,10 +353,19 @@ export const MiddleColumn: React.FC<MiddleColumnProps> = ({
                 )}
                 {stats && stats.started && stats.rxPackets === 0 && (
                   <p className="mt-2 text-[10px] leading-relaxed opacity-80 text-[var(--mut)]">
-                    长时间 0 收包：请放行防火墙入站 UDP 2425；
-                    若与飞秋同机运行属正常（新版已自动避让端口）
+                    长时间 0 收包：请放行防火墙入站 UDP 2425
                   </p>
                 )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    probePeers();
+                    window.setTimeout(() => pullStatsRef.current?.(), 600);
+                  }}
+                  className="mt-2.5 px-3 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[10px] text-[var(--text)] hover:bg-[var(--accsoft)] hover:border-[var(--acc)] cursor-pointer"
+                >
+                  重新探测
+                </button>
               </div>
             )}
           </div>

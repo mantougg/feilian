@@ -40,11 +40,13 @@ const (
 
 // Stats 引擎自诊断快照（UI 空态排查入站链路用）。
 type Stats struct {
-	Started    bool   `json:"started"`    // 引擎是否已启动
-	ListenPort int    `json:"listenPort"` // 实际监听端口（避让后 != 2425）
-	RxPackets  uint64 `json:"rxPackets"`  // 收到的 UDP 报文数（含本机回环）
-	TxPackets  uint64 `json:"txPackets"`  // 发出的报文调用数
-	Peers      int    `json:"peers"`      // 当前在线用户数
+	Started    bool   `json:"started"`            // 引擎是否已启动
+	ListenPort int    `json:"listenPort"`         // 实际监听端口（避让后 != 2425）
+	RxPackets  uint64 `json:"rxPackets"`          // 收到的 UDP 报文数（含本机回环）
+	TxPackets  uint64 `json:"txPackets"`          // 发出的报文调用数
+	Peers      int    `json:"peers"`              // 当前在线用户数
+	RxUnparsed uint64 `json:"rxUnparsed"`         // 收到但格式解析失败的报文数
+	RawSample  string `json:"rawSample,omitempty"` // 最近一条解析失败报文的 hex 样例（≤96B，排查异构客户端用）
 }
 
 // Peer 描述局域网内的一个其他用户。
@@ -94,6 +96,9 @@ type Engine struct {
 	rebound    atomic.Bool                 // 看门狗已执行过一次避让（只兜一次）
 	rxPackets  atomic.Uint64               // 收包计数（自诊断）
 	txPackets  atomic.Uint64               // 发包计数（自诊断）
+	rxUnparsed atomic.Uint64               // 解析失败计数（异构客户端排查）
+	rawMu      sync.Mutex                  // 保护 rawSample
+	rawSample  string                      // 最近一条解析失败报文的 hex 样例
 	bcast      []net.IP                    // 各网段定向广播地址，广播时逐个发送
 	packetNo   atomic.Uint64               // 出站报文序号（回执匹配的唯一凭据）
 	peers      map[string]Peer
@@ -275,8 +280,24 @@ func (e *Engine) rebind(port int) error {
 
 // Stats 返回引擎自诊断快照（UI 空态展示"收到 N 包"帮助判断入站链路）。
 func (e *Engine) Stats() Stats {
-	s := Stats{Started: e.conn.Load() != nil, ListenPort: int(e.listenPort.Load()), RxPackets: e.rxPackets.Load(), TxPackets: e.txPackets.Load(), Peers: len(e.Peers())}
-	return s
+	e.rawMu.Lock()
+	sample := e.rawSample
+	e.rawMu.Unlock()
+	return Stats{
+		Started:    e.conn.Load() != nil,
+		ListenPort: int(e.listenPort.Load()),
+		RxPackets:  e.rxPackets.Load(),
+		TxPackets:  e.txPackets.Load(),
+		Peers:      len(e.Peers()),
+		RxUnparsed: e.rxUnparsed.Load(),
+		RawSample:  sample,
+	}
+}
+
+// Probe 手动重播一次上线探测（UI「重新探测」按钮）：启动时的 Entry 广播
+// 若恰逢网络抖动丢失，靠它补一轮全网 AnsEntry 应答。
+func (e *Engine) Probe() error {
+	return e.broadcastPacket(CmdBrEntry, e.presenceJSON())
 }
 
 // Stop 停止引擎：先广播 CmdBrExit 下线包，再结束内部循环并关闭套接字。
@@ -351,8 +372,11 @@ func (e *Engine) readLoop() {
 		e.rxPackets.Add(1)
 		pkt, ok := ParsePacket(string(buf[:n]))
 		if !ok {
+			e.noteUnparsed(buf[:n])
 			continue
 		}
+		// 昵称/主机名按编码探测转 UTF-8（飞秋 GBK），后续建档/展示/主键统一
+		pkt.Nick, pkt.Host = DecodeExtra(pkt.Nick), DecodeExtra(pkt.Host)
 		// 广播回环会把本机发出的包投递回自己，按 nick/host 过滤
 		if pkt.Nick == e.cfg.Nick && pkt.Host == e.cfg.Hostname {
 			continue
@@ -361,8 +385,28 @@ func (e *Engine) readLoop() {
 	}
 }
 
+// noteUnparsed 记录解析失败报文：计数 + 保留最近一条 hex 样例（截断 96 字节），
+// 供 UI 空态与远程排查判断异构客户端（飞秋/飞鸽）的线上格式。
+func (e *Engine) noteUnparsed(raw []byte) {
+	e.rxUnparsed.Add(1)
+	const max = 96
+	if len(raw) > max {
+		raw = raw[:max]
+	}
+	e.rawMu.Lock()
+	e.rawSample = fmt.Sprintf("%x", raw)
+	e.rawMu.Unlock()
+}
+
 // handlePacket 按命令码分发已解析的报文。
 func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
+	// 晚到者发现：先按发送者建档再分发。IPMsg 的建档语义只认 Entry/AnsEntry，
+	// 但二者仅在客户端启动瞬间各广播一次——飞联后启动时，长期在线的
+	// 飞秋用户只剩私有命令心跳，严格按协议将永远错过他们
+	// （云桌面「已收 60 包 0 联系人」即此因）。任何报文都证明发送者在线。
+	if pkt.Command != CmdBrExit {
+		e.ensurePeer(pkt, from)
+	}
 	// 飞联扩展码（0x1001/0x1002）本体落在选项位区间（0x1000 = OptNoPopup），
 	// 必须先按完整值精确匹配，再走标准命令的掩码剥离；
 	// 顺序不可颠倒，否则 typing 会被剥成 CmdBrEntry。
@@ -399,7 +443,25 @@ func (e *Engine) handlePacket(pkt Packet, from *net.UDPAddr) {
 		e.upsertPresence(pkt, from)
 		e.emit(Event{Type: EventReceipt, MsgID: pkt.Extra, Time: time.Now()})
 	default:
-		// 未知命令静默忽略，保持与异构客户端（飞秋/飞鸽）兼容
+		// 未知命令（飞秋/飞鸽私有扩展）：建档已由 ensurePeer 完成，
+		// 这里只补刷新 LastSeen，否则 90s 清扫会把它误判离线再反复重建
+		e.refreshPeer(pkt, from)
+	}
+}
+
+// ensurePeer 未知发送者建档：用户表没有该 nick@host 时按在线入库并推
+// peer_online（extra 非 JSON 时部门空、状态兜底 online，飞秋报文即此形态）；
+// 已知发送者是空操作，后续刷新由各命令分支完成。
+func (e *Engine) ensurePeer(pkt Packet, from *net.UDPAddr) {
+	if pkt.Nick == "" {
+		return // 无昵称无法构成用户表主键
+	}
+	key := peerKey(pkt.Nick, pkt.Host)
+	e.peersMu.RLock()
+	_, ok := e.peers[key]
+	e.peersMu.RUnlock()
+	if !ok {
+		e.upsertPresence(pkt, from)
 	}
 }
 

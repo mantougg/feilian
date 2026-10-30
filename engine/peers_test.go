@@ -84,10 +84,11 @@ func TestSweepTimeout(t *testing.T) {
 		t.Fatalf("超时用户未移出用户表: %+v", e.Peers())
 	}
 
-	// 未知心跳来源不建档（等 Entry/AnsEntry 带全资料再入库）
+	// 未知心跳来源建档（晚到者发现）：飞联后启动时长期在线的飞秋用户
+	// 只剩心跳，等 Entry 将永远错过——任何报文都证明发送者在线
 	e.handlePacket(Packet{Version: 1, PacketNo: 9, Nick: "路人", Host: "PC-X", Command: CmdNoOperation}, testAddr)
-	if len(e.Peers()) != 0 {
-		t.Fatalf("心跳不应建档: %+v", e.Peers())
+	if len(e.Peers()) != 1 {
+		t.Fatalf("未知心跳应建档: %+v", e.Peers())
 	}
 }
 

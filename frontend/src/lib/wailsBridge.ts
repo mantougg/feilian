@@ -43,6 +43,7 @@ interface WailsHost {
         CloseWindow?: () => void;
         GetPeers?: () => Promise<EngineEvent['peer'][]>;
         EngineStats?: () => Promise<EngineStats>;
+        ProbePeers?: () => Promise<void>;
         SendText?: (ip: string, text: string) => Promise<string>;
         SendTyping?: (ip: string) => Promise<void>;
         BroadcastText?: (text: string) => Promise<void>;
@@ -100,6 +101,8 @@ export interface EngineStats {
   rxPackets: number;
   txPackets: number;
   peers: number;
+  rxUnparsed: number;
+  rawSample?: string;
 }
 
 /** 引擎自诊断（监听端口/收发包数）；浏览器形态返回未启动的空态。 */
@@ -111,8 +114,14 @@ export async function getEngineStats(): Promise<EngineStats> {
       rxPackets: 0,
       txPackets: 0,
       peers: 0,
+      rxUnparsed: 0,
     }
   );
+}
+
+/** 手动重播上线广播（空态「重新探测」按钮）。 */
+export async function probePeers(): Promise<void> {
+  await host().go?.main?.App?.ProbePeers?.();
 }
 
 export interface SelfInfo {

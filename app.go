@@ -365,6 +365,14 @@ func (a *App) EngineStats() engine.Stats {
 	return a.engine.Stats()
 }
 
+// ProbePeers 手动重播上线广播（联系人空态「重新探测」按钮）。
+func (a *App) ProbePeers() error {
+	if a.engine == nil {
+		return engine.ErrNotStarted
+	}
+	return a.engine.Probe()
+}
+
 // SendText 向指定 IP 发送文本消息，返回报文 PacketNo 字符串（回执关联用）。
 func (a *App) SendText(ip, text string) (string, error) {
 	if a.engine == nil {
